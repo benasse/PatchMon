@@ -8,12 +8,11 @@ import {
 	Columns,
 	Database,
 	GripVertical,
+	Info,
 	Lock,
 	RefreshCw,
 	Search,
 	Server,
-	Shield,
-	ShieldCheck,
 	Trash2,
 	Unlock,
 	X,
@@ -21,13 +20,17 @@ import {
 import { useEffect, useMemo, useRef, useState } from "react";
 import { useNavigate, useSearchParams } from "react-router-dom";
 import { dashboardAPI, repositoryAPI } from "../utils/api";
+import {
+	getRepositoryTransport,
+	isHttpsRepository,
+} from "../utils/repositoryTransport";
 
 const Repositories = () => {
 	const queryClient = useQueryClient();
 	const navigate = useNavigate();
 	const [searchParams] = useSearchParams();
 	const [searchTerm, setSearchTerm] = useState("");
-	const [filterType, setFilterType] = useState("all"); // all, secure, insecure
+	const [filterType, setFilterType] = useState("all"); // API values: all, secure (HTTPS), insecure (without HTTPS)
 	const [filterStatus, setFilterStatus] = useState("all"); // all, active, inactive
 	const [hostFilter, setHostFilter] = useState("");
 	const [sortField, setSortField] = useState("name");
@@ -62,7 +65,7 @@ const Repositories = () => {
 			{ id: "name", label: "Repository", visible: true, order: 0 },
 			{ id: "url", label: "URL", visible: true, order: 1 },
 			{ id: "distribution", label: "Distribution", visible: true, order: 2 },
-			{ id: "security", label: "Security", visible: true, order: 3 },
+			{ id: "security", label: "Transport", visible: true, order: 3 },
 			{ id: "status", label: "Status", visible: true, order: 4 },
 			{ id: "hostCount", label: "Hosts", visible: true, order: 5 },
 			{ id: "actions", label: "Actions", visible: true, order: 6 },
@@ -71,7 +74,9 @@ const Repositories = () => {
 		const saved = localStorage.getItem("repositories-column-config");
 		if (saved) {
 			try {
-				return JSON.parse(saved);
+				return JSON.parse(saved).map((column) =>
+					column.id === "security" ? { ...column, label: "Transport" } : column,
+				);
 			} catch (e) {
 				console.error("Failed to parse saved column config:", e);
 			}
@@ -185,7 +190,7 @@ const Repositories = () => {
 			{ id: "name", label: "Repository", visible: true, order: 0 },
 			{ id: "url", label: "URL", visible: true, order: 1 },
 			{ id: "distribution", label: "Distribution", visible: true, order: 2 },
-			{ id: "security", label: "Security", visible: true, order: 3 },
+			{ id: "security", label: "Transport", visible: true, order: 3 },
 			{ id: "status", label: "Status", visible: true, order: 4 },
 			{ id: "hostCount", label: "Hosts", visible: true, order: 5 },
 			{ id: "actions", label: "Actions", visible: true, order: 6 },
@@ -231,14 +236,8 @@ const Repositories = () => {
 
 			// Handle special cases
 			if (sortField === "security") {
-				// Use the same logic as filtering to determine isSecure
-				const aIsSecure =
-					a.isSecure !== undefined ? a.isSecure : a.url.startsWith("https://");
-				const bIsSecure =
-					b.isSecure !== undefined ? b.isSecure : b.url.startsWith("https://");
-				// Sort by boolean: true (Secure) comes before false (Insecure) when ascending
-				aValue = aIsSecure ? 1 : 0;
-				bValue = bIsSecure ? 1 : 0;
+				aValue = getRepositoryTransport(a);
+				bValue = getRepositoryTransport(b);
 			} else if (sortField === "status") {
 				aValue = a.is_active ? "Active" : "Inactive";
 				bValue = b.is_active ? "Active" : "Inactive";
@@ -356,6 +355,15 @@ const Repositories = () => {
 				</div>
 			</div>
 
+			<div className="flex items-start gap-2 mb-6 px-3 py-2 rounded-md bg-primary-50 dark:bg-primary-900/20 text-sm text-secondary-700 dark:text-secondary-200">
+				<Info className="h-4 w-4 mt-0.5 flex-shrink-0 text-primary-600 dark:text-primary-400" />
+				<p>
+					HTTPS indicates encrypted transport only. Repositories delivered
+					without HTTPS may still be authenticated through package-manager
+					signature verification.
+				</p>
+			</div>
+
 			{/* Summary Stats */}
 			<div className="grid grid-cols-2 lg:grid-cols-4 gap-4 mb-6 flex-shrink-0">
 				<div className="card p-4 cursor-pointer hover:shadow-card-hover dark:hover:shadow-card-hover-dark transition-shadow duration-200">
@@ -388,10 +396,10 @@ const Repositories = () => {
 
 				<div className="card p-4 cursor-pointer hover:shadow-card-hover dark:hover:shadow-card-hover-dark transition-shadow duration-200">
 					<div className="flex items-center">
-						<Shield className="h-5 w-5 text-warning-600 mr-2" />
+						<Lock className="h-5 w-5 text-success-600 mr-2" />
 						<div>
 							<p className="text-sm text-secondary-500 dark:text-white">
-								Secure (HTTPS)
+								HTTPS Repositories
 							</p>
 							<p className="text-xl font-semibold text-secondary-900 dark:text-white">
 								{stats?.secureRepositories || 0}
@@ -402,10 +410,10 @@ const Repositories = () => {
 
 				<div className="card p-4 cursor-pointer hover:shadow-card-hover dark:hover:shadow-card-hover-dark transition-shadow duration-200">
 					<div className="flex items-center">
-						<ShieldCheck className="h-5 w-5 text-danger-600 mr-2" />
+						<Lock className="h-5 w-5 text-primary-600 mr-2" />
 						<div>
 							<p className="text-sm text-secondary-500 dark:text-white">
-								Security Score
+								HTTPS Coverage
 							</p>
 							<p className="text-xl font-semibold text-secondary-900 dark:text-white">
 								{stats?.securityPercentage || 0}%
@@ -464,14 +472,14 @@ const Repositories = () => {
 								</div>
 							)}
 
-							{/* Security Filter */}
+							{/* Transport Filter (backed by legacy secure/insecure API values) */}
 							<div className="sm:w-48">
 								<select
 									value={filterType}
 									onChange={(e) => setFilterType(e.target.value)}
 									className="w-full px-3 py-2 border border-secondary-300 dark:border-secondary-600 rounded-md focus:ring-2 focus:ring-primary-500 focus:border-transparent bg-white dark:bg-secondary-800 text-secondary-900 dark:text-white"
 								>
-									<option value="all">All Security Types</option>
+									<option value="all">HTTP or HTTPS</option>
 									<option value="secure">HTTPS Only</option>
 									<option value="insecure">HTTP Only</option>
 								</select>
@@ -524,10 +532,8 @@ const Repositories = () => {
 								{/* Mobile Card Layout */}
 								<div className="md:hidden space-y-3 overflow-y-auto h-full pb-4">
 									{filteredAndSortedRepositories.map((repo) => {
-										const isSecure =
-											repo.isSecure !== undefined
-												? repo.isSecure
-												: repo.url.startsWith("https://");
+										const isHttps = isHttpsRepository(repo);
+										const transport = getRepositoryTransport(repo);
 										return (
 											// biome-ignore lint/a11y/useSemanticElements: Complex card layout requires div
 											<div
@@ -590,24 +596,24 @@ const Repositories = () => {
 													</div>
 												)}
 
-												{/* Security and Hosts */}
+												{/* Transport and Hosts */}
 												<div className="flex flex-wrap items-center gap-3 pt-2 border-t border-secondary-200 dark:border-secondary-600">
 													{visibleColumns.some(
 														(col) => col.id === "security",
 													) && (
 														<div className="flex items-center gap-1">
-															{isSecure ? (
+															{isHttps ? (
 																<>
 																	<Lock className="h-4 w-4 text-green-600" />
 																	<span className="text-sm text-green-600 font-medium">
-																		Secure
+																		HTTPS
 																	</span>
 																</>
 															) : (
 																<>
 																	<Unlock className="h-4 w-4 text-orange-600" />
 																	<span className="text-sm text-orange-600 font-medium">
-																		Insecure
+																		{transport}
 																	</span>
 																</>
 															)}
@@ -740,21 +746,19 @@ const Repositories = () => {
 					</div>
 				);
 			case "security": {
-				const isSecure =
-					repo.isSecure !== undefined
-						? repo.isSecure
-						: repo.url.startsWith("https://");
+				const isHttps = isHttpsRepository(repo);
+				const transport = getRepositoryTransport(repo);
 				return (
 					<div className="flex items-center justify-start">
-						{isSecure ? (
+						{isHttps ? (
 							<div className="flex items-center gap-1 text-green-600">
 								<Lock className="h-4 w-4" />
-								<span className="text-sm">Secure</span>
+								<span className="text-sm">HTTPS</span>
 							</div>
 						) : (
 							<div className="flex items-center gap-1 text-orange-600">
 								<Unlock className="h-4 w-4" />
-								<span className="text-sm">Insecure</span>
+								<span className="text-sm">{transport}</span>
 							</div>
 						)}
 					</div>

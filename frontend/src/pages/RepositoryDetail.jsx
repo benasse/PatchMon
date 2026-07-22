@@ -5,13 +5,13 @@ import {
 	Calendar,
 	Database,
 	Globe,
+	Info,
 	Lock,
 	Package,
 	RotateCcw,
 	Search,
 	Server,
 	Shield,
-	ShieldOff,
 	Trash2,
 	Unlock,
 } from "lucide-react";
@@ -32,6 +32,10 @@ import {
 	packagesAPI,
 	repositoryAPI,
 } from "../utils/api";
+import {
+	getRepositoryTransport,
+	isHttpsRepository,
+} from "../utils/repositoryTransport";
 
 const RepositoryDetail = () => {
 	const isActiveId = useId();
@@ -83,6 +87,8 @@ const RepositoryDetail = () => {
 		enabled: !!repositoryId,
 	});
 
+	const isHttps = isHttpsRepository(repository);
+	const transport = getRepositoryTransport(repository);
 	const packages = packagesResponse?.data?.packages || [];
 	const packagesPagination = packagesResponse?.data?.pagination || {};
 
@@ -340,7 +346,7 @@ const RepositoryDetail = () => {
 					</Link>
 					<div>
 						<div className="flex items-center gap-3">
-							{repository.isSecure ? (
+							{isHttps ? (
 								<Lock className="h-6 w-6 text-green-600" />
 							) : (
 								<Unlock className="h-6 w-6 text-orange-600" />
@@ -528,20 +534,28 @@ const RepositoryDetail = () => {
 							<div className="space-y-4">
 								<div>
 									<span className="text-sm font-medium text-secondary-500 dark:text-white">
-										Security
+										Transport
 									</span>
 									<div className="flex items-center mt-1">
-										{repository.isSecure ? (
+										{isHttps ? (
 											<>
-												<Shield className="h-4 w-4 text-green-600 mr-2" />
-												<span className="text-green-600">Secure (HTTPS)</span>
+												<Lock className="h-4 w-4 text-green-600 mr-2" />
+												<span className="text-green-600">HTTPS</span>
 											</>
 										) : (
 											<>
-												<ShieldOff className="h-4 w-4 text-orange-600 mr-2" />
-												<span className="text-orange-600">Insecure (HTTP)</span>
+												<Unlock className="h-4 w-4 text-orange-600 mr-2" />
+												<span className="text-orange-600">{transport}</span>
 											</>
 										)}
+									</div>
+									<div className="flex items-start gap-2 mt-2 text-xs text-secondary-500 dark:text-secondary-300">
+										<Info className="h-3.5 w-3.5 mt-0.5 flex-shrink-0" />
+										<span>
+											HTTPS describes transport encryption only; repository
+											authenticity may be verified separately by the package
+											manager.
+										</span>
 									</div>
 								</div>
 								{repository.priority && (
