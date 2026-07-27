@@ -7,6 +7,7 @@ import {
 	CheckCircle,
 	CheckSquare,
 	ChevronDown,
+	ChevronUp,
 	Clock,
 	Columns,
 	Container,
@@ -43,6 +44,44 @@ import {
 	userPreferencesAPI,
 } from "../utils/api";
 import { getOSDisplayName, OSIcon } from "../utils/osIcons.jsx";
+import {
+	buildOSSecuritySummary,
+	getOSSecuritySupportReference,
+	OS_SECURITY_STATUS,
+	OS_SECURITY_STATUS_META,
+} from "../utils/osSecuritySupport";
+
+const HOSTS_VIEW = "hosts";
+const OS_SUPPORT_STATUS_VIEW = "os-support-status";
+
+const SUPPORT_BADGE_CLASSES = {
+	[OS_SECURITY_STATUS.SECURITY_ACTIVE]:
+		"bg-green-100 text-green-800 dark:bg-green-900 dark:text-green-200",
+	[OS_SECURITY_STATUS.SECURITY_MAINTENANCE]:
+		"bg-amber-100 text-amber-800 dark:bg-amber-900 dark:text-amber-200",
+	[OS_SECURITY_STATUS.SECURITY_EOL]:
+		"bg-red-100 text-red-800 dark:bg-red-900 dark:text-red-200",
+	[OS_SECURITY_STATUS.ROLLING]:
+		"bg-blue-100 text-blue-800 dark:bg-blue-900 dark:text-blue-200",
+	[OS_SECURITY_STATUS.UNKNOWN]:
+		"bg-secondary-100 text-secondary-700 dark:bg-secondary-700 dark:text-white",
+	[OS_SECURITY_STATUS.NON_LINUX]:
+		"bg-slate-100 text-slate-700 dark:bg-slate-700 dark:text-slate-200",
+};
+
+const SupportStatusBadge = ({ status }) => {
+	const meta =
+		OS_SECURITY_STATUS_META[status] ||
+		OS_SECURITY_STATUS_META[OS_SECURITY_STATUS.UNKNOWN];
+	return (
+		<span
+			className={`inline-flex items-center px-2 py-1 rounded-md text-xs font-medium ${SUPPORT_BADGE_CLASSES[status] || SUPPORT_BADGE_CLASSES[OS_SECURITY_STATUS.UNKNOWN]}`}
+			title={meta.description}
+		>
+			{meta.shortLabel}
+		</span>
+	);
+};
 
 const Hosts = () => {
 	const hostGroupFilterId = useId();
@@ -57,8 +96,13 @@ const Hosts = () => {
 		text: "",
 		type: "success", // "success" or "error"
 	});
-	const [searchParams] = useSearchParams();
+	const [searchParams, setSearchParams] = useSearchParams();
 	const navigate = useNavigate();
+	const initialView =
+		searchParams.get("view") === OS_SUPPORT_STATUS_VIEW
+			? OS_SUPPORT_STATUS_VIEW
+			: HOSTS_VIEW;
+	const [activeView, setActiveView] = useState(initialView);
 
 	// Table state
 	const [searchTerm, setSearchTerm] = useState("");
@@ -72,6 +116,8 @@ const Hosts = () => {
 	const [groupBy, setGroupBy] = useState("none");
 	const [showColumnSettings, setShowColumnSettings] = useState(false);
 	const [hideStale, setHideStale] = useState(false);
+	const [supportStatusFilter, setSupportStatusFilter] = useState("all");
+	const [showSupportReference, setShowSupportReference] = useState(false);
 
 	// Debounce search for backend (avoid refetch on every keystroke)
 	const [debouncedSearch, setDebouncedSearch] = useState("");
@@ -92,6 +138,13 @@ const Hosts = () => {
 		const showFiltersParam = searchParams.get("showFilters");
 		const osFilterParam = searchParams.get("osFilter");
 		const groupParam = searchParams.get("group");
+		const viewParam = searchParams.get("view");
+
+		setActiveView(
+			viewParam === OS_SUPPORT_STATUS_VIEW
+				? OS_SUPPORT_STATUS_VIEW
+				: HOSTS_VIEW,
+		);
 
 		if (filter === "needsUpdates") {
 			setShowFilters(true);
@@ -159,6 +212,18 @@ const Hosts = () => {
 		}
 	}, [searchParams, navigate]);
 
+	const handleViewChange = (nextView) => {
+		setActiveView(nextView);
+		const nextParams = new URLSearchParams(searchParams);
+		if (nextView === OS_SUPPORT_STATUS_VIEW) {
+			nextParams.set("view", OS_SUPPORT_STATUS_VIEW);
+		} else {
+			nextParams.delete("view");
+			setSupportStatusFilter("all");
+		}
+		setSearchParams(nextParams, { replace: true });
+	};
+
 	// Default column config (shared for initial state and reset)
 	const default_column_config = useMemo(
 		() => [
@@ -188,10 +253,16 @@ const Hosts = () => {
 				visible: true,
 				order: 15,
 			},
-			{ id: "ssg_version", label: "SSG Version", visible: false, order: 16 },
-			{ id: "notes", label: "Notes", visible: false, order: 17 },
-			{ id: "last_update", label: "Last Update", visible: true, order: 18 },
-			{ id: "actions", label: "Actions", visible: true, order: 19 },
+			{
+				id: "os_support_status",
+				label: "Support Status",
+				visible: false,
+				order: 16,
+			},
+			{ id: "ssg_version", label: "SSG Version", visible: false, order: 17 },
+			{ id: "notes", label: "Notes", visible: false, order: 18 },
+			{ id: "last_update", label: "Last Update", visible: true, order: 19 },
+			{ id: "actions", label: "Actions", visible: true, order: 20 },
 		],
 		[],
 	);
@@ -311,6 +382,18 @@ const Hosts = () => {
 		queryKey: ["hostGroups"],
 		queryFn: () => hostGroupsAPI.list().then((res) => res.data),
 	});
+
+	const osSecuritySummary = useMemo(
+		() => buildOSSecuritySummary(hosts || []),
+		[hosts],
+	);
+	const osSecurityByHostId = useMemo(() => {
+		const byId = new Map();
+		for (const row of osSecuritySummary.rows) {
+			byId.set(row.id, row);
+		}
+		return byId;
+	}, [osSecuritySummary.rows]);
 
 	// Fetch global settings to check if auto-update master toggle is enabled
 	// Fetch settings to check global auto-update status
@@ -662,8 +745,13 @@ const Hosts = () => {
 
 			// Hide stale filter
 			const matchesHideStale = !hideStale || !host.isStale;
+			const supportRow = osSecurityByHostId.get(host.id);
+			const matchesSupportStatus =
+				activeView !== OS_SUPPORT_STATUS_VIEW ||
+				supportStatusFilter === "all" ||
+				supportRow?.securitySupport?.status === supportStatusFilter;
 
-			return matchesUrlFilter && matchesHideStale;
+			return matchesUrlFilter && matchesHideStale && matchesSupportStatus;
 		});
 
 		// Sorting
@@ -730,6 +818,12 @@ const Hosts = () => {
 				case "security_updates":
 					aValue = a.securityUpdatesCount || 0;
 					bValue = b.securityUpdatesCount || 0;
+					break;
+				case "os_support_status":
+					aValue =
+						osSecurityByHostId.get(a.id)?.securitySupport?.status || "unknown";
+					bValue =
+						osSecurityByHostId.get(b.id)?.securitySupport?.status || "unknown";
 					break;
 				case "needs_reboot":
 					// Sort by boolean: false (0) comes before true (1)
@@ -807,6 +901,9 @@ const Hosts = () => {
 		hideStale,
 		wsStatusMap,
 		selectedHostIdsForFilter,
+		activeView,
+		supportStatusFilter,
+		osSecurityByHostId,
 	]);
 
 	// Get unique OS types from hosts for dynamic dropdown
@@ -1189,6 +1286,16 @@ const Hosts = () => {
 						{host.securityUpdatesCount || 0}
 					</button>
 				);
+			case "os_support_status": {
+				const support = osSecurityByHostId.get(host.id)?.securitySupport;
+				return (
+					<div className="flex justify-center">
+						<SupportStatusBadge
+							status={support?.status || OS_SECURITY_STATUS.UNKNOWN}
+						/>
+					</div>
+				);
+			}
 			case "last_update":
 				return (
 					<div className="text-sm text-secondary-500 dark:text-white">
@@ -1334,111 +1441,165 @@ const Hosts = () => {
 				</div>
 			</div>
 
-			{/* Stats Summary */}
-			<div className="grid grid-cols-2 sm:grid-cols-4 gap-3 sm:gap-4 mb-6">
+			<div className="mb-6 inline-flex rounded-lg border border-secondary-200 dark:border-secondary-600 bg-white dark:bg-secondary-800 p-1">
 				<button
 					type="button"
-					className="card p-4 cursor-pointer hover:shadow-card-hover dark:hover:shadow-card-hover-dark transition-shadow duration-200 text-left w-full"
-					onClick={handleTotalHostsClick}
+					onClick={() => handleViewChange(HOSTS_VIEW)}
+					className={`px-3 py-1.5 text-sm font-medium rounded-md transition-colors ${
+						activeView === HOSTS_VIEW
+							? "bg-primary-600 text-white"
+							: "text-secondary-600 dark:text-white hover:bg-secondary-100 dark:hover:bg-secondary-700"
+					}`}
 				>
-					<div className="flex items-center">
-						<Server className="h-5 w-5 text-primary-600 mr-2" />
-						<div>
-							<p className="text-sm text-secondary-500 dark:text-white">
-								Total Hosts
-							</p>
-							<p className="text-xl font-semibold text-secondary-900 dark:text-white">
-								{hosts?.length || 0}
-							</p>
-						</div>
-					</div>
+					Hosts
 				</button>
 				<button
 					type="button"
-					className="card p-4 cursor-pointer hover:shadow-card-hover dark:hover:shadow-card-hover-dark transition-shadow duration-200 text-left w-full"
-					onClick={handleNeedsUpdatesClick}
+					onClick={() => handleViewChange(OS_SUPPORT_STATUS_VIEW)}
+					className={`px-3 py-1.5 text-sm font-medium rounded-md transition-colors ${
+						activeView === OS_SUPPORT_STATUS_VIEW
+							? "bg-primary-600 text-white"
+							: "text-secondary-600 dark:text-white hover:bg-secondary-100 dark:hover:bg-secondary-700"
+					}`}
 				>
-					<div className="flex items-center">
-						<Clock className="h-5 w-5 text-warning-600 mr-2" />
-						<div>
-							<p className="text-sm text-secondary-500 dark:text-white">
-								Needs Updates
-							</p>
-							<p className="text-xl font-semibold text-secondary-900 dark:text-white">
-								{hosts?.filter((h) => h.updatesCount > 0).length || 0}
-							</p>
-						</div>
-					</div>
-				</button>
-				<button
-					type="button"
-					className="card p-4 cursor-pointer hover:shadow-card-hover dark:hover:shadow-card-hover-dark transition-shadow duration-200 text-left w-full"
-					onClick={() => {
-						const newSearchParams = new URLSearchParams();
-						newSearchParams.set("reboot", "true");
-						// Clear filter parameter when setting reboot filter
-						navigate(`/hosts?${newSearchParams.toString()}`, { replace: true });
-					}}
-				>
-					<div className="flex items-center">
-						<RotateCcw className="h-5 w-5 text-orange-600 mr-2" />
-						<div>
-							<p className="text-sm text-secondary-500 dark:text-white">
-								Needs Reboots
-							</p>
-							<p className="text-xl font-semibold text-secondary-900 dark:text-white">
-								{hosts?.filter((h) => h.needs_reboot === true).length || 0}
-							</p>
-						</div>
-					</div>
-				</button>
-				<button
-					type="button"
-					className="card p-4 cursor-pointer hover:shadow-card-hover dark:hover:shadow-card-hover-dark transition-shadow duration-200 text-left w-full"
-					onClick={handleConnectionStatusClick}
-				>
-					<div className="flex items-center">
-						<Wifi className="h-5 w-5 text-primary-600 mr-2" />
-						<div className="flex-1">
-							<p className="text-sm text-secondary-500 dark:text-white mb-1">
-								Connection Status
-							</p>
-							{(() => {
-								const connectedCount =
-									hosts?.filter(
-										(h) => wsStatusMap[h.api_id]?.connected === true,
-									).length || 0;
-								const offlineCount =
-									hosts?.filter(
-										(h) => wsStatusMap[h.api_id]?.connected !== true,
-									).length || 0;
-								return (
-									<div className="flex gap-4">
-										<div className="flex items-center gap-1">
-											<div className="w-2 h-2 bg-green-500 rounded-full"></div>
-											<span className="text-sm font-medium text-secondary-900 dark:text-white">
-												{connectedCount}
-											</span>
-											<span className="text-xs text-secondary-500 dark:text-white hidden sm:inline">
-												Connected
-											</span>
-										</div>
-										<div className="flex items-center gap-1">
-											<div className="w-2 h-2 bg-red-500 rounded-full"></div>
-											<span className="text-sm font-medium text-secondary-900 dark:text-white">
-												{offlineCount}
-											</span>
-											<span className="text-xs text-secondary-500 dark:text-white hidden sm:inline">
-												Offline
-											</span>
-										</div>
-									</div>
-								);
-							})()}
-						</div>
-					</div>
+					OS Support Status
 				</button>
 			</div>
+
+			{/* Stats Summary */}
+			{activeView === OS_SUPPORT_STATUS_VIEW ? (
+				<div className="grid grid-cols-2 md:grid-cols-3 xl:grid-cols-6 gap-3 sm:gap-4 mb-6">
+					{[
+						OS_SECURITY_STATUS.SECURITY_ACTIVE,
+						OS_SECURITY_STATUS.SECURITY_MAINTENANCE,
+						OS_SECURITY_STATUS.SECURITY_EOL,
+						OS_SECURITY_STATUS.ROLLING,
+						OS_SECURITY_STATUS.UNKNOWN,
+						OS_SECURITY_STATUS.NON_LINUX,
+					].map((status) => {
+						const meta = OS_SECURITY_STATUS_META[status];
+						return (
+							<div key={status} className="card p-4">
+								<div className="min-w-0">
+									<p className="text-sm text-secondary-500 dark:text-white truncate">
+										{meta.shortLabel}
+									</p>
+									<p className="text-xl font-semibold text-secondary-900 dark:text-white">
+										{osSecuritySummary.counts[status] || 0}
+									</p>
+								</div>
+							</div>
+						);
+					})}
+				</div>
+			) : (
+				<div className="grid grid-cols-2 sm:grid-cols-4 gap-3 sm:gap-4 mb-6">
+					<button
+						type="button"
+						className="card p-4 cursor-pointer hover:shadow-card-hover dark:hover:shadow-card-hover-dark transition-shadow duration-200 text-left w-full"
+						onClick={handleTotalHostsClick}
+					>
+						<div className="flex items-center">
+							<Server className="h-5 w-5 text-primary-600 mr-2" />
+							<div>
+								<p className="text-sm text-secondary-500 dark:text-white">
+									Total Hosts
+								</p>
+								<p className="text-xl font-semibold text-secondary-900 dark:text-white">
+									{hosts?.length || 0}
+								</p>
+							</div>
+						</div>
+					</button>
+					<button
+						type="button"
+						className="card p-4 cursor-pointer hover:shadow-card-hover dark:hover:shadow-card-hover-dark transition-shadow duration-200 text-left w-full"
+						onClick={handleNeedsUpdatesClick}
+					>
+						<div className="flex items-center">
+							<Clock className="h-5 w-5 text-warning-600 mr-2" />
+							<div>
+								<p className="text-sm text-secondary-500 dark:text-white">
+									Needs Updates
+								</p>
+								<p className="text-xl font-semibold text-secondary-900 dark:text-white">
+									{hosts?.filter((h) => h.updatesCount > 0).length || 0}
+								</p>
+							</div>
+						</div>
+					</button>
+					<button
+						type="button"
+						className="card p-4 cursor-pointer hover:shadow-card-hover dark:hover:shadow-card-hover-dark transition-shadow duration-200 text-left w-full"
+						onClick={() => {
+							const newSearchParams = new URLSearchParams();
+							newSearchParams.set("reboot", "true");
+							// Clear filter parameter when setting reboot filter
+							navigate(`/hosts?${newSearchParams.toString()}`, {
+								replace: true,
+							});
+						}}
+					>
+						<div className="flex items-center">
+							<RotateCcw className="h-5 w-5 text-orange-600 mr-2" />
+							<div>
+								<p className="text-sm text-secondary-500 dark:text-white">
+									Needs Reboots
+								</p>
+								<p className="text-xl font-semibold text-secondary-900 dark:text-white">
+									{hosts?.filter((h) => h.needs_reboot === true).length || 0}
+								</p>
+							</div>
+						</div>
+					</button>
+					<button
+						type="button"
+						className="card p-4 cursor-pointer hover:shadow-card-hover dark:hover:shadow-card-hover-dark transition-shadow duration-200 text-left w-full"
+						onClick={handleConnectionStatusClick}
+					>
+						<div className="flex items-center">
+							<Wifi className="h-5 w-5 text-primary-600 mr-2" />
+							<div className="flex-1">
+								<p className="text-sm text-secondary-500 dark:text-white mb-1">
+									Connection Status
+								</p>
+								{(() => {
+									const connectedCount =
+										hosts?.filter(
+											(h) => wsStatusMap[h.api_id]?.connected === true,
+										).length || 0;
+									const offlineCount =
+										hosts?.filter(
+											(h) => wsStatusMap[h.api_id]?.connected !== true,
+										).length || 0;
+									return (
+										<div className="flex gap-4">
+											<div className="flex items-center gap-1">
+												<div className="w-2 h-2 bg-green-500 rounded-full"></div>
+												<span className="text-sm font-medium text-secondary-900 dark:text-white">
+													{connectedCount}
+												</span>
+												<span className="text-xs text-secondary-500 dark:text-white hidden sm:inline">
+													Connected
+												</span>
+											</div>
+											<div className="flex items-center gap-1">
+												<div className="w-2 h-2 bg-red-500 rounded-full"></div>
+												<span className="text-sm font-medium text-secondary-900 dark:text-white">
+													{offlineCount}
+												</span>
+												<span className="text-xs text-secondary-500 dark:text-white hidden sm:inline">
+													Offline
+												</span>
+											</div>
+										</div>
+									);
+								})()}
+							</div>
+						</div>
+					</button>
+				</div>
+			)}
 
 			{/* Hosts List */}
 			<div className="card flex-1 flex flex-col md:overflow-hidden min-h-0">
@@ -1668,6 +1829,25 @@ const Hosts = () => {
 												</select>
 											</div>
 										)}
+									{activeView === OS_SUPPORT_STATUS_VIEW && (
+										<div>
+											<label className="block text-sm font-medium text-secondary-700 dark:text-secondary-200 mb-1">
+												Support category
+											</label>
+											<select
+												value={supportStatusFilter}
+												onChange={(e) => setSupportStatusFilter(e.target.value)}
+												className="w-full border border-secondary-300 dark:border-secondary-600 rounded-lg px-3 py-2.5 sm:py-2 focus:ring-2 focus:ring-primary-500 focus:border-primary-500 bg-white dark:bg-secondary-800 text-secondary-900 dark:text-white min-h-[44px]"
+											>
+												<option value="all">All categories</option>
+												{Object.values(OS_SECURITY_STATUS).map((status) => (
+													<option key={status} value={status}>
+														{OS_SECURITY_STATUS_META[status].label}
+													</option>
+												))}
+											</select>
+										</div>
+									)}
 									<div className="flex items-end">
 										<button
 											type="button"
@@ -1679,6 +1859,7 @@ const Hosts = () => {
 												setOsVersionFilter("all");
 												setGroupBy("none");
 												setHideStale(false);
+												setSupportStatusFilter("all");
 											}}
 											className="btn-outline w-full min-h-[44px]"
 										>
@@ -1691,7 +1872,231 @@ const Hosts = () => {
 					</div>
 
 					<div className="flex-1 md:overflow-hidden">
-						{!hosts || hosts.length === 0 ? (
+						{activeView === OS_SUPPORT_STATUS_VIEW ? (
+							<div className="md:h-full overflow-auto space-y-4">
+								<div className="border border-secondary-200 dark:border-secondary-600 rounded-lg overflow-hidden">
+									<button
+										type="button"
+										onClick={() =>
+											setShowSupportReference(!showSupportReference)
+										}
+										className="w-full flex items-center justify-between gap-3 px-4 py-3 bg-secondary-50 dark:bg-secondary-700 text-left"
+									>
+										<div>
+											<h3 className="text-sm font-semibold text-secondary-900 dark:text-white">
+												Support reference
+											</h3>
+											<p className="text-xs text-secondary-500 dark:text-white/80 mt-0.5">
+												PatchMon evaluates theoretical OS support status by
+												version. Paid subscriptions and repositories are not
+												verified in v1.
+											</p>
+										</div>
+										{showSupportReference ? (
+											<ChevronUp className="h-4 w-4 text-secondary-500 dark:text-white flex-shrink-0" />
+										) : (
+											<ChevronDown className="h-4 w-4 text-secondary-500 dark:text-white flex-shrink-0" />
+										)}
+									</button>
+									{showSupportReference && (
+										<div className="overflow-x-auto">
+											<table className="min-w-full divide-y divide-secondary-200 dark:divide-secondary-600">
+												<thead className="bg-white dark:bg-secondary-800">
+													<tr>
+														<th className="px-4 py-2 text-left text-xs font-medium text-secondary-500 dark:text-white uppercase">
+															Distro / family
+														</th>
+														<th className="px-4 py-2 text-left text-xs font-medium text-secondary-500 dark:text-white uppercase">
+															Version
+														</th>
+														<th className="px-4 py-2 text-left text-xs font-medium text-secondary-500 dark:text-white uppercase">
+															Release
+														</th>
+														<th className="px-4 py-2 text-left text-xs font-medium text-secondary-500 dark:text-white uppercase">
+															Category
+														</th>
+														<th className="px-4 py-2 text-left text-xs font-medium text-secondary-500 dark:text-white uppercase">
+															Security support until
+														</th>
+														<th className="px-4 py-2 text-left text-xs font-medium text-secondary-500 dark:text-white uppercase">
+															Note
+														</th>
+														<th className="px-4 py-2 text-left text-xs font-medium text-secondary-500 dark:text-white uppercase">
+															Sources
+														</th>
+													</tr>
+												</thead>
+												<tbody className="bg-white dark:bg-secondary-800 divide-y divide-secondary-200 dark:divide-secondary-600">
+													{getOSSecuritySupportReference().map((row) => (
+														<tr
+															key={`${row.displayName}-${row.version}-${row.status}`}
+															className="align-top"
+														>
+															<td className="px-4 py-2 text-sm text-secondary-900 dark:text-white whitespace-nowrap">
+																{row.displayName}
+															</td>
+															<td className="px-4 py-2 text-sm text-secondary-900 dark:text-white whitespace-nowrap">
+																{row.version}
+															</td>
+															<td className="px-4 py-2 text-sm text-secondary-900 dark:text-white whitespace-nowrap">
+																{row.codename || "-"}
+															</td>
+															<td className="px-4 py-2 text-sm text-secondary-900 dark:text-white whitespace-nowrap">
+																{OS_SECURITY_STATUS_META[row.status]?.label ||
+																	row.status}
+															</td>
+															<td className="px-4 py-2 text-sm text-secondary-900 dark:text-white whitespace-nowrap">
+																{row.supportEndsAt || "-"}
+															</td>
+															<td className="px-4 py-2 text-sm text-secondary-700 dark:text-white">
+																{row.note}
+															</td>
+															<td className="px-4 py-2 text-sm">
+																<div className="flex flex-wrap gap-2">
+																	{row.sources.length > 0 ? (
+																		row.sources.map((source) => (
+																			<a
+																				key={source.url}
+																				href={source.url}
+																				target="_blank"
+																				rel="noreferrer"
+																				className="text-primary-600 hover:text-primary-800 dark:text-primary-400 dark:hover:text-primary-300 hover:underline"
+																			>
+																				{source.label}
+																			</a>
+																		))
+																	) : (
+																		<span className="text-secondary-400 dark:text-white/70">
+																			-
+																		</span>
+																	)}
+																</div>
+															</td>
+														</tr>
+													))}
+												</tbody>
+											</table>
+										</div>
+									)}
+								</div>
+
+								{!hosts || hosts.length === 0 ? (
+									<div className="text-center py-8">
+										<Server className="h-12 w-12 text-secondary-400 mx-auto mb-4" />
+										<p className="text-secondary-500">
+											No hosts registered yet
+										</p>
+									</div>
+								) : filteredAndSortedHosts.length === 0 ? (
+									<div className="text-center py-8">
+										<Search className="h-12 w-12 text-secondary-400 mx-auto mb-4" />
+										<p className="text-secondary-500">
+											No hosts match your current filters
+										</p>
+									</div>
+								) : (
+									<div className="overflow-x-auto">
+										<table className="min-w-full divide-y divide-secondary-200 dark:divide-secondary-600">
+											<thead className="bg-secondary-50 dark:bg-secondary-700">
+												<tr>
+													<th className="px-4 py-2 text-left text-xs font-medium text-secondary-500 dark:text-white uppercase">
+														Host
+													</th>
+													<th className="px-4 py-2 text-left text-xs font-medium text-secondary-500 dark:text-white uppercase">
+														OS
+													</th>
+													<th className="px-4 py-2 text-left text-xs font-medium text-secondary-500 dark:text-white uppercase">
+														Version
+													</th>
+													<th className="px-4 py-2 text-left text-xs font-medium text-secondary-500 dark:text-white uppercase">
+														Release
+													</th>
+													<th className="px-4 py-2 text-left text-xs font-medium text-secondary-500 dark:text-white uppercase">
+														Category
+													</th>
+													<th className="px-4 py-2 text-left text-xs font-medium text-secondary-500 dark:text-white uppercase">
+														Security support until
+													</th>
+													<th className="px-4 py-2 text-left text-xs font-medium text-secondary-500 dark:text-white uppercase">
+														Reason
+													</th>
+													<th className="px-4 py-2 text-left text-xs font-medium text-secondary-500 dark:text-white uppercase">
+														Last report
+													</th>
+												</tr>
+											</thead>
+											<tbody className="bg-white dark:bg-secondary-800 divide-y divide-secondary-200 dark:divide-secondary-600">
+												{filteredAndSortedHosts.map((host) => {
+													const supportRow = osSecurityByHostId.get(host.id);
+													const support = supportRow?.securitySupport || {
+														status: OS_SECURITY_STATUS.UNKNOWN,
+														supportEndsAt: null,
+														reason: "Version not recognized",
+													};
+													const normalized = supportRow?.normalized || {};
+													return (
+														<tr
+															key={host.id}
+															className="hover:bg-secondary-50 dark:hover:bg-secondary-700 align-top"
+														>
+															<td className="px-4 py-2 text-sm whitespace-nowrap">
+																<Link
+																	to={`/hosts/${host.id}`}
+																	className="font-medium text-primary-600 hover:text-primary-800 dark:text-primary-400 dark:hover:text-primary-300 hover:underline"
+																>
+																	{host.friendly_name ||
+																		host.hostname ||
+																		host.api_id}
+																</Link>
+																{host.hostname && (
+																	<div className="text-xs text-secondary-500 dark:text-white/70 font-mono">
+																		{host.hostname}
+																	</div>
+																)}
+															</td>
+															<td className="px-4 py-2 text-sm text-secondary-900 dark:text-white whitespace-nowrap">
+																<div className="flex items-center gap-2">
+																	<OSIcon
+																		osType={host.os_type}
+																		className="h-4 w-4"
+																	/>
+																	<span>
+																		{normalized.displayName ||
+																			getOSDisplayName(host.os_type)}
+																	</span>
+																</div>
+															</td>
+															<td className="px-4 py-2 text-sm text-secondary-900 dark:text-white whitespace-nowrap">
+																{host.os_version || "N/A"}
+															</td>
+															<td className="px-4 py-2 text-sm text-secondary-900 dark:text-white whitespace-nowrap">
+																{normalized.codename || "-"}
+															</td>
+															<td className="px-4 py-2 whitespace-nowrap">
+																<SupportStatusBadge
+																	status={
+																		support.status || OS_SECURITY_STATUS.UNKNOWN
+																	}
+																/>
+															</td>
+															<td className="px-4 py-2 text-sm text-secondary-900 dark:text-white whitespace-nowrap">
+																{support.supportEndsAt || "-"}
+															</td>
+															<td className="px-4 py-2 text-sm text-secondary-700 dark:text-white min-w-64">
+																{support.reason}
+															</td>
+															<td className="px-4 py-2 text-sm text-secondary-500 dark:text-white whitespace-nowrap">
+																{formatRelativeTime(host.last_update)}
+															</td>
+														</tr>
+													);
+												})}
+											</tbody>
+										</table>
+									</div>
+								)}
+							</div>
+						) : !hosts || hosts.length === 0 ? (
 							<div className="text-center py-8">
 								<Server className="h-12 w-12 text-secondary-400 mx-auto mb-4" />
 								<p className="text-secondary-500">No hosts registered yet</p>
@@ -1823,6 +2228,17 @@ const Hosts = () => {
 																		</div>
 																	)}
 																	<div className="flex flex-wrap items-center gap-2">
+																		{visibleColumns.some(
+																			(col) => col.id === "os_support_status",
+																		) && (
+																			<SupportStatusBadge
+																				status={
+																					osSecurityByHostId.get(host.id)
+																						?.securitySupport?.status ||
+																					OS_SECURITY_STATUS.UNKNOWN
+																				}
+																			/>
+																		)}
 																		{visibleColumns.some(
 																			(col) => col.id === "status",
 																		) && (
@@ -2090,6 +2506,17 @@ const Hosts = () => {
 																			>
 																				{column.label}
 																				{getSortIcon("security_updates")}
+																			</button>
+																		) : column.id === "os_support_status" ? (
+																			<button
+																				type="button"
+																				onClick={() =>
+																					handleSort("os_support_status")
+																				}
+																				className="flex items-center gap-2 hover:text-secondary-700"
+																			>
+																				{column.label}
+																				{getSortIcon("os_support_status")}
 																			</button>
 																		) : column.id === "needs_reboot" ? (
 																			<button
