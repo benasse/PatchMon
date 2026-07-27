@@ -231,6 +231,7 @@ CREATE TABLE IF NOT EXISTS dashboard_layout (
     user_id TEXT PRIMARY KEY REFERENCES users(id) ON DELETE CASCADE,
     stats_columns INTEGER NOT NULL DEFAULT 5,
     charts_columns INTEGER NOT NULL DEFAULT 3,
+    excluded_host_group_ids TEXT[] NOT NULL DEFAULT '{}',
     updated_at TIMESTAMP(3) NOT NULL
 );
 

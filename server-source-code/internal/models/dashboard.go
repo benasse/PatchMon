@@ -16,8 +16,9 @@ type DashboardPreference struct {
 
 // DashboardLayout matches dashboard_layout table.
 type DashboardLayout struct {
-	UserID        string    `db:"user_id"`
-	StatsColumns  int       `db:"stats_columns"`
-	ChartsColumns int       `db:"charts_columns"`
-	UpdatedAt     time.Time `db:"updated_at"`
+	UserID               string    `db:"user_id"`
+	StatsColumns         int       `db:"stats_columns"`
+	ChartsColumns        int       `db:"charts_columns"`
+	ExcludedHostGroupIDs []string  `db:"excluded_host_group_ids"`
+	UpdatedAt            time.Time `db:"updated_at"`
 }

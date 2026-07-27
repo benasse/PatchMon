@@ -246,21 +246,27 @@ func (h *DashboardPreferencesHandler) GetLayout(w http.ResponseWriter, r *http.R
 	layout, err := h.store.GetLayout(r.Context(), userID)
 	if err != nil || layout == nil {
 		JSON(w, http.StatusOK, map[string]interface{}{
-			"stats_columns":  defaultGridLayout.StatsColumns,
-			"charts_columns": defaultGridLayout.ChartsColumns,
+			"stats_columns":           defaultGridLayout.StatsColumns,
+			"charts_columns":          defaultGridLayout.ChartsColumns,
+			"excluded_host_group_ids": []string{},
+			"excludedHostGroupIds":    []string{},
 		})
 		return
 	}
 	JSON(w, http.StatusOK, map[string]interface{}{
-		"stats_columns":  layout.StatsColumns,
-		"charts_columns": layout.ChartsColumns,
+		"stats_columns":           layout.StatsColumns,
+		"charts_columns":          layout.ChartsColumns,
+		"excluded_host_group_ids": layout.ExcludedHostGroupIDs,
+		"excludedHostGroupIds":    layout.ExcludedHostGroupIDs,
 	})
 }
 
 // UpdateLayoutRequest is the body for PUT /dashboard-preferences/layout.
 type UpdateLayoutRequest struct {
-	StatsColumns  *int `json:"stats_columns,omitempty"`
-	ChartsColumns *int `json:"charts_columns,omitempty"`
+	StatsColumns            *int     `json:"stats_columns,omitempty"`
+	ChartsColumns           *int     `json:"charts_columns,omitempty"`
+	ExcludedHostGroupIDs    []string `json:"excluded_host_group_ids,omitempty"`
+	ExcludedHostGroupIDsAlt []string `json:"excludedHostGroupIds,omitempty"`
 }
 
 // UpdateLayout handles PUT /dashboard-preferences/layout.
@@ -283,20 +289,47 @@ func (h *DashboardPreferencesHandler) UpdateLayout(w http.ResponseWriter, r *htt
 	if req.ChartsColumns != nil && *req.ChartsColumns >= 2 && *req.ChartsColumns <= 4 {
 		chartsCols = *req.ChartsColumns
 	}
+	excludedHostGroupIDs := req.ExcludedHostGroupIDs
+	if excludedHostGroupIDs == nil {
+		excludedHostGroupIDs = req.ExcludedHostGroupIDsAlt
+	}
+	excludedHostGroupIDs = uniqueNonEmptyStrings(excludedHostGroupIDs)
 	layout := &models.DashboardLayout{
-		UserID:        userID,
-		StatsColumns:  statsCols,
-		ChartsColumns: chartsCols,
+		UserID:               userID,
+		StatsColumns:         statsCols,
+		ChartsColumns:        chartsCols,
+		ExcludedHostGroupIDs: excludedHostGroupIDs,
 	}
 	if err := h.store.UpsertLayout(r.Context(), layout); err != nil {
 		Error(w, http.StatusInternalServerError, "Failed to update dashboard layout")
 		return
 	}
 	JSON(w, http.StatusOK, map[string]interface{}{
-		"message":        "Dashboard layout updated successfully",
-		"stats_columns":  statsCols,
-		"charts_columns": chartsCols,
+		"message":                 "Dashboard layout updated successfully",
+		"stats_columns":           statsCols,
+		"charts_columns":          chartsCols,
+		"excluded_host_group_ids": excludedHostGroupIDs,
+		"excludedHostGroupIds":    excludedHostGroupIDs,
 	})
+}
+
+func uniqueNonEmptyStrings(values []string) []string {
+	if len(values) == 0 {
+		return []string{}
+	}
+	seen := make(map[string]struct{}, len(values))
+	out := make([]string, 0, len(values))
+	for _, value := range values {
+		if value == "" {
+			continue
+		}
+		if _, ok := seen[value]; ok {
+			continue
+		}
+		seen[value] = struct{}{}
+		out = append(out, value)
+	}
+	return out
 }
 
 // GetDefaults returns GET /dashboard-preferences/defaults.

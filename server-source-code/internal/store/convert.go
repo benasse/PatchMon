@@ -282,10 +282,11 @@ func dbDashboardPreferenceToModel(d db.DashboardPreference) models.DashboardPref
 
 func dbDashboardLayoutToModel(d db.DashboardLayout) models.DashboardLayout {
 	return models.DashboardLayout{
-		UserID:        d.UserID,
-		StatsColumns:  int(d.StatsColumns),
-		ChartsColumns: int(d.ChartsColumns),
-		UpdatedAt:     pgTime(d.UpdatedAt),
+		UserID:               d.UserID,
+		StatsColumns:         int(d.StatsColumns),
+		ChartsColumns:        int(d.ChartsColumns),
+		ExcludedHostGroupIDs: d.ExcludedHostGroupIds,
+		UpdatedAt:            pgTime(d.UpdatedAt),
 	}
 }
 

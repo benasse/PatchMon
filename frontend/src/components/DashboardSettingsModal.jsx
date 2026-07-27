@@ -25,7 +25,7 @@ import {
 	X,
 } from "lucide-react";
 import { useEffect, useState } from "react";
-import { dashboardPreferencesAPI } from "../utils/api";
+import { dashboardPreferencesAPI, hostGroupsAPI } from "../utils/api";
 
 // Sortable Card Item Component (card width is set by dragging the card edge in dashboard edit mode)
 const SortableCardItem = ({ card, onToggle }) => {
@@ -106,6 +106,7 @@ const DashboardSettingsModal = ({ isOpen, onClose }) => {
 	const [hasChanges, setHasChanges] = useState(false);
 	const [layout_state, set_layout_state] = useState(DEFAULT_LAYOUT);
 	const [layout_has_changes, set_layout_has_changes] = useState(false);
+	const [excluded_host_group_ids, set_excluded_host_group_ids] = useState([]);
 	const queryClient = useQueryClient();
 
 	const sensors = useSensors(
@@ -137,6 +138,12 @@ const DashboardSettingsModal = ({ isOpen, onClose }) => {
 		enabled: isOpen,
 	});
 
+	const { data: host_groups = [] } = useQuery({
+		queryKey: ["hostGroups"],
+		queryFn: () => hostGroupsAPI.list().then((res) => res.data),
+		enabled: isOpen,
+	});
+
 	// Update preferences mutation (onClose is called from handleSave after both saves if needed)
 	const updatePreferencesMutation = useMutation({
 		mutationFn: (preferences) => dashboardPreferencesAPI.update(preferences),
@@ -159,7 +166,12 @@ const DashboardSettingsModal = ({ isOpen, onClose }) => {
 			queryClient.setQueryData(["dashboardLayout"], {
 				stats_columns: response.data.stats_columns,
 				charts_columns: response.data.charts_columns,
+				excluded_host_group_ids: response.data.excluded_host_group_ids ?? [],
+				excludedHostGroupIds: response.data.excludedHostGroupIds ?? [],
 			});
+			queryClient.invalidateQueries({ queryKey: ["dashboardStats"] });
+			queryClient.invalidateQueries({ queryKey: ["packageTrends"] });
+			queryClient.invalidateQueries({ queryKey: ["dashboardRecentCollection"] });
 			set_layout_has_changes(false);
 		},
 		onError: (error) => {
@@ -244,6 +256,11 @@ const DashboardSettingsModal = ({ isOpen, onClose }) => {
 				charts_columns:
 					layout_data.charts_columns ?? DEFAULT_LAYOUT.charts_columns,
 			});
+			set_excluded_host_group_ids(
+				layout_data.excluded_host_group_ids ??
+					layout_data.excludedHostGroupIds ??
+					[],
+			);
 		}
 	}, [layout_data, isOpen]);
 
@@ -276,6 +293,15 @@ const DashboardSettingsModal = ({ isOpen, onClose }) => {
 		setHasChanges(true);
 	};
 
+	const toggleExcludedHostGroup = (groupId) => {
+		set_excluded_host_group_ids((current) =>
+			current.includes(groupId)
+				? current.filter((id) => id !== groupId)
+				: [...current, groupId],
+		);
+		set_layout_has_changes(true);
+	};
+
 	const handleSave = async () => {
 		const preferences = cards.map((card) => ({
 			cardId: card.cardId,
@@ -289,6 +315,7 @@ const DashboardSettingsModal = ({ isOpen, onClose }) => {
 				updateLayoutMutation.mutateAsync({
 					stats_columns: Number(layout_state.stats_columns),
 					charts_columns: Number(layout_state.charts_columns),
+					excluded_host_group_ids: excluded_host_group_ids,
 				}),
 			);
 		}
@@ -317,6 +344,7 @@ const DashboardSettingsModal = ({ isOpen, onClose }) => {
 			setHasChanges(true);
 		}
 		set_layout_state(DEFAULT_LAYOUT);
+		set_excluded_host_group_ids([]);
 		set_layout_has_changes(true);
 	};
 
@@ -416,6 +444,42 @@ const DashboardSettingsModal = ({ isOpen, onClose }) => {
 										))}
 									</select>
 								</div>
+							</div>
+						</div>
+
+						<div className="mb-6 p-3 rounded-lg bg-secondary-50 dark:bg-secondary-700/50 border border-secondary-200 dark:border-secondary-600">
+							<p className="text-sm font-medium text-secondary-900 dark:text-white mb-2">
+								Excluded host groups
+							</p>
+							<div className="space-y-2 max-h-40 overflow-y-auto">
+								{host_groups.length === 0 ? (
+									<p className="text-sm text-secondary-500 dark:text-secondary-200">
+										No host groups available
+									</p>
+								) : (
+									host_groups.map((group) => (
+										<label
+											key={group.id}
+											className="flex items-center justify-between gap-3 rounded-md border border-secondary-200 dark:border-secondary-600 bg-white dark:bg-secondary-800 px-3 py-2 text-sm"
+										>
+											<span className="flex items-center gap-2 min-w-0">
+												<input
+													type="checkbox"
+													checked={excluded_host_group_ids.includes(group.id)}
+													onChange={() => toggleExcludedHostGroup(group.id)}
+													className="h-4 w-4 rounded border-secondary-300 text-primary-600 focus:ring-primary-500"
+												/>
+												<span
+													className="h-3 w-3 rounded-full flex-shrink-0"
+													style={{ backgroundColor: group.color || "#3B82F6" }}
+												/>
+												<span className="truncate text-secondary-900 dark:text-white">
+													{group.name}
+												</span>
+											</span>
+										</label>
+									))
+								)}
 							</div>
 						</div>
 

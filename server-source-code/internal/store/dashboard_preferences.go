@@ -89,10 +89,11 @@ func (s *DashboardPreferencesStore) UpsertLayout(ctx context.Context, layout *mo
 	d := s.db.DB(ctx)
 	layout.UpdatedAt = time.Now()
 	arg := db.UpsertDashboardLayoutParams{
-		UserID:        layout.UserID,
-		StatsColumns:  int32(layout.StatsColumns),
-		ChartsColumns: int32(layout.ChartsColumns),
-		UpdatedAt:     pgtime.From(layout.UpdatedAt),
+		UserID:               layout.UserID,
+		StatsColumns:         int32(layout.StatsColumns),
+		ChartsColumns:        int32(layout.ChartsColumns),
+		ExcludedHostGroupIds: layout.ExcludedHostGroupIDs,
+		UpdatedAt:            pgtime.From(layout.UpdatedAt),
 	}
 	return d.Queries.UpsertDashboardLayout(ctx, arg)
 }

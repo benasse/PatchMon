@@ -21,7 +21,7 @@ func (q *Queries) DeleteDashboardPreferencesByUserID(ctx context.Context, userID
 }
 
 const getDashboardLayout = `-- name: GetDashboardLayout :one
-SELECT user_id, stats_columns, charts_columns, updated_at
+SELECT user_id, stats_columns, charts_columns, excluded_host_group_ids, updated_at
 FROM dashboard_layout
 WHERE user_id = $1
 `
@@ -33,6 +33,7 @@ func (q *Queries) GetDashboardLayout(ctx context.Context, userID string) (Dashbo
 		&i.UserID,
 		&i.StatsColumns,
 		&i.ChartsColumns,
+		&i.ExcludedHostGroupIds,
 		&i.UpdatedAt,
 	)
 	return i, err
@@ -105,19 +106,21 @@ func (q *Queries) ListDashboardPreferencesByUserID(ctx context.Context, userID s
 }
 
 const upsertDashboardLayout = `-- name: UpsertDashboardLayout :exec
-INSERT INTO dashboard_layout (user_id, stats_columns, charts_columns, updated_at)
-VALUES ($1, $2, $3, $4)
+INSERT INTO dashboard_layout (user_id, stats_columns, charts_columns, excluded_host_group_ids, updated_at)
+VALUES ($1, $2, $3, $4, $5)
 ON CONFLICT (user_id) DO UPDATE SET
     stats_columns = EXCLUDED.stats_columns,
     charts_columns = EXCLUDED.charts_columns,
+    excluded_host_group_ids = EXCLUDED.excluded_host_group_ids,
     updated_at = EXCLUDED.updated_at
 `
 
 type UpsertDashboardLayoutParams struct {
-	UserID        string           `json:"user_id"`
-	StatsColumns  int32            `json:"stats_columns"`
-	ChartsColumns int32            `json:"charts_columns"`
-	UpdatedAt     pgtype.Timestamp `json:"updated_at"`
+	UserID               string           `json:"user_id"`
+	StatsColumns         int32            `json:"stats_columns"`
+	ChartsColumns        int32            `json:"charts_columns"`
+	ExcludedHostGroupIds []string         `json:"excluded_host_group_ids"`
+	UpdatedAt            pgtype.Timestamp `json:"updated_at"`
 }
 
 func (q *Queries) UpsertDashboardLayout(ctx context.Context, arg UpsertDashboardLayoutParams) error {
@@ -125,6 +128,7 @@ func (q *Queries) UpsertDashboardLayout(ctx context.Context, arg UpsertDashboard
 		arg.UserID,
 		arg.StatsColumns,
 		arg.ChartsColumns,
+		arg.ExcludedHostGroupIds,
 		arg.UpdatedAt,
 	)
 	return err

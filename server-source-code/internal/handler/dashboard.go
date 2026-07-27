@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"time"
 
+	"github.com/PatchMon/PatchMon/server-source-code/internal/middleware"
 	"github.com/PatchMon/PatchMon/server-source-code/internal/queue"
 	"github.com/PatchMon/PatchMon/server-source-code/internal/store"
 	"github.com/go-chi/chi/v5"
@@ -29,7 +30,8 @@ func NewDashboardHandler(dashboard *store.DashboardStore, hosts *store.HostsStor
 
 // Stats handles GET /dashboard/stats.
 func (h *DashboardHandler) Stats(w http.ResponseWriter, r *http.Request) {
-	stats, err := h.dashboard.GetStats(r.Context())
+	excludedHostGroupIDs := h.excludedHostGroupIDs(r)
+	stats, err := h.dashboard.GetStats(r.Context(), excludedHostGroupIDs)
 	if err != nil {
 		Error(w, http.StatusInternalServerError, "Failed to load dashboard stats")
 		return
@@ -185,7 +187,8 @@ func (h *DashboardHandler) Packages(w http.ResponseWriter, r *http.Request) {
 func (h *DashboardHandler) PackageTrends(w http.ResponseWriter, r *http.Request) {
 	days := parseIntQuery(r, "days", 30)
 	hostID := r.URL.Query().Get("hostId")
-	data, err := h.dashboard.GetPackageTrends(r.Context(), days, hostID)
+	excludedHostGroupIDs := h.excludedHostGroupIDs(r)
+	data, err := h.dashboard.GetPackageTrends(r.Context(), days, hostID, excludedHostGroupIDs)
 	if err != nil {
 		Error(w, http.StatusInternalServerError, "Failed to load package trends")
 		return
@@ -205,12 +208,18 @@ func (h *DashboardHandler) RecentUsers(w http.ResponseWriter, r *http.Request) {
 
 // RecentCollection handles GET /dashboard/recent-collection.
 func (h *DashboardHandler) RecentCollection(w http.ResponseWriter, r *http.Request) {
-	hosts, err := h.dashboard.GetRecentCollection(r.Context(), 5)
+	excludedHostGroupIDs := h.excludedHostGroupIDs(r)
+	hosts, err := h.dashboard.GetRecentCollection(r.Context(), 5, excludedHostGroupIDs)
 	if err != nil {
 		Error(w, http.StatusInternalServerError, "Failed to load recent collection")
 		return
 	}
 	JSON(w, http.StatusOK, hosts)
+}
+
+func (h *DashboardHandler) excludedHostGroupIDs(r *http.Request) []string {
+	userID, _ := r.Context().Value(middleware.UserIDKey).(string)
+	return h.dashboard.GetExcludedHostGroupIDs(r.Context(), userID)
 }
 
 // HostQueue handles GET /dashboard/hosts/:hostId/queue.

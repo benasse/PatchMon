@@ -155,10 +155,11 @@ type ComplianceScan struct {
 }
 
 type DashboardLayout struct {
-	UserID        string           `json:"user_id"`
-	StatsColumns  int32            `json:"stats_columns"`
-	ChartsColumns int32            `json:"charts_columns"`
-	UpdatedAt     pgtype.Timestamp `json:"updated_at"`
+	UserID               string           `json:"user_id"`
+	StatsColumns         int32            `json:"stats_columns"`
+	ChartsColumns        int32            `json:"charts_columns"`
+	ExcludedHostGroupIds []string         `json:"excluded_host_group_ids"`
+	UpdatedAt            pgtype.Timestamp `json:"updated_at"`
 }
 
 type DashboardPreference struct {

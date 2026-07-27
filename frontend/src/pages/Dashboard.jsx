@@ -565,12 +565,23 @@ const Dashboard = () => {
 			dashboardPreferencesAPI.updateLayout({
 				stats_columns: Number(layout.stats_columns),
 				charts_columns: Number(layout.charts_columns),
+				excluded_host_group_ids:
+					layout.excluded_host_group_ids ??
+					layout.excludedHostGroupIds ??
+					dashboard_layout?.excluded_host_group_ids ??
+					dashboard_layout?.excludedHostGroupIds ??
+					[],
 			}),
 		onSuccess: (response) => {
 			query_client.setQueryData(["dashboardLayout"], {
 				stats_columns: response.data.stats_columns,
 				charts_columns: response.data.charts_columns,
+				excluded_host_group_ids: response.data.excluded_host_group_ids ?? [],
+				excludedHostGroupIds: response.data.excludedHostGroupIds ?? [],
 			});
+			query_client.invalidateQueries({ queryKey: ["dashboardStats"] });
+			query_client.invalidateQueries({ queryKey: ["packageTrends"] });
+			query_client.invalidateQueries({ queryKey: ["dashboardRecentCollection"] });
 		},
 		onError: (err) => {
 			console.error("Failed to update dashboard layout:", err);

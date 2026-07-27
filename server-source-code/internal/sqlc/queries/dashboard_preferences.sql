@@ -12,14 +12,15 @@ INSERT INTO dashboard_preferences (id, user_id, card_id, enabled, "order", col_s
 VALUES ($1, $2, $3, $4, $5, $6, $7, $8);
 
 -- name: GetDashboardLayout :one
-SELECT user_id, stats_columns, charts_columns, updated_at
+SELECT user_id, stats_columns, charts_columns, excluded_host_group_ids, updated_at
 FROM dashboard_layout
 WHERE user_id = $1;
 
 -- name: UpsertDashboardLayout :exec
-INSERT INTO dashboard_layout (user_id, stats_columns, charts_columns, updated_at)
-VALUES ($1, $2, $3, $4)
+INSERT INTO dashboard_layout (user_id, stats_columns, charts_columns, excluded_host_group_ids, updated_at)
+VALUES ($1, $2, $3, $4, $5)
 ON CONFLICT (user_id) DO UPDATE SET
     stats_columns = EXCLUDED.stats_columns,
     charts_columns = EXCLUDED.charts_columns,
+    excluded_host_group_ids = EXCLUDED.excluded_host_group_ids,
     updated_at = EXCLUDED.updated_at;

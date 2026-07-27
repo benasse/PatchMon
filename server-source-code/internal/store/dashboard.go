@@ -23,7 +23,7 @@ func NewDashboardStore(db database.DBProvider) *DashboardStore {
 }
 
 // GetStats returns dashboard statistics matching Node backend structure for frontend compatibility.
-func (s *DashboardStore) GetStats(ctx context.Context) (map[string]interface{}, error) {
+func (s *DashboardStore) GetStats(ctx context.Context, excludedHostGroupIDs []string) (map[string]interface{}, error) {
 	d := s.db.DB(ctx)
 	now := time.Now()
 	updateIntervalMinutes := 60
@@ -37,10 +37,60 @@ func (s *DashboardStore) GetStats(ctx context.Context) (map[string]interface{}, 
 	thresholdTime := now.Add(-time.Duration(thresholdMinutes) * time.Minute)
 	offlineThreshold := now.Add(-time.Duration(updateIntervalMinutes*3) * time.Minute)
 
-	stats, err := d.Queries.GetDashboardStats(ctx, db.GetDashboardStatsParams{
-		LastUpdate:   pgtime.From(thresholdTime),
-		LastUpdate_2: pgtime.From(offlineThreshold),
-	})
+	var stats db.GetDashboardStatsRow
+	err := d.RawQueryRow(ctx, `
+WITH included_hosts AS (
+    SELECT h.*
+    FROM hosts h
+    WHERE cardinality($3::text[]) = 0
+       OR NOT EXISTS (
+           SELECT 1
+           FROM host_group_memberships hgm
+           WHERE hgm.host_id = h.id
+             AND hgm.host_group_id = ANY($3::text[])
+       )
+),
+host_counts AS (
+    SELECT
+        COUNT(*)::int AS total_hosts,
+        COUNT(*) FILTER (WHERE status = 'active' AND last_update < $1)::int AS errored_hosts,
+        COUNT(*) FILTER (WHERE status = 'active' AND last_update < $2)::int AS offline_hosts,
+        COUNT(*) FILTER (WHERE needs_reboot = true)::int AS hosts_needing_reboot
+    FROM included_hosts
+),
+hp_package_counts AS (
+    SELECT
+        COUNT(DISTINCT hp.host_id)::int AS hosts_needing_updates,
+        COUNT(DISTINCT hp.package_id)::int AS total_outdated_packages,
+        COUNT(DISTINCT hp.package_id) FILTER (WHERE hp.is_security_update)::int AS security_updates
+    FROM host_packages hp
+    JOIN included_hosts h ON h.id = hp.host_id
+    WHERE hp.needs_update = true
+)
+SELECT
+    hc.total_hosts,
+    hpc.hosts_needing_updates,
+    hpc.total_outdated_packages,
+    hc.errored_hosts,
+    hpc.security_updates,
+    hc.offline_hosts,
+    hc.hosts_needing_reboot,
+    (SELECT COUNT(*)::int FROM host_groups WHERE cardinality($3::text[]) = 0 OR id <> ALL($3::text[])),
+    (SELECT COUNT(*)::int FROM users),
+    (SELECT COUNT(*)::int FROM repositories)
+FROM host_counts hc
+CROSS JOIN hp_package_counts hpc`, pgtime.From(thresholdTime), pgtime.From(offlineThreshold), excludedHostGroupIDs).Scan(
+		&stats.TotalHosts,
+		&stats.HostsNeedingUpdates,
+		&stats.TotalOutdatedPackages,
+		&stats.ErroredHosts,
+		&stats.SecurityUpdates,
+		&stats.OfflineHosts,
+		&stats.HostsNeedingReboot,
+		&stats.Column8,
+		&stats.Column9,
+		&stats.Column10,
+	)
 	if err != nil {
 		return nil, err
 	}
@@ -61,7 +111,7 @@ func (s *DashboardStore) GetStats(ctx context.Context) (map[string]interface{}, 
 		upToDateHosts = 0
 	}
 
-	osRows, _ := d.Queries.GetOSDistributionByTypeAndVersion(ctx)
+	osRows, _ := s.getOSDistributionByTypeAndVersion(ctx, excludedHostGroupIDs)
 	osDistribution := make([]map[string]interface{}, len(osRows))
 	for i, r := range osRows {
 		osDistribution[i] = map[string]interface{}{
@@ -124,6 +174,53 @@ func (s *DashboardStore) GetStats(ctx context.Context) (map[string]interface{}, 
 		"trends":      trends,
 		"lastUpdated": now.Format(time.RFC3339),
 	}, nil
+}
+
+func (s *DashboardStore) GetExcludedHostGroupIDs(ctx context.Context, userID string) []string {
+	if userID == "" {
+		return []string{}
+	}
+	d := s.db.DB(ctx)
+	layout, err := d.Queries.GetDashboardLayout(ctx, userID)
+	if err != nil {
+		return []string{}
+	}
+	return layout.ExcludedHostGroupIds
+}
+
+func (s *DashboardStore) getOSDistributionByTypeAndVersion(ctx context.Context, excludedHostGroupIDs []string) ([]db.GetOSDistributionByTypeAndVersionRow, error) {
+	d := s.db.DB(ctx)
+	rows, err := d.Raw(ctx, `
+SELECT h.os_type, h.os_version,
+    (h.os_type || ' ' || h.os_version)::text as name,
+    COUNT(*)::int as count
+FROM hosts h
+WHERE h.status = 'active'
+  AND (
+      cardinality($1::text[]) = 0
+      OR NOT EXISTS (
+          SELECT 1
+          FROM host_group_memberships hgm
+          WHERE hgm.host_id = h.id
+            AND hgm.host_group_id = ANY($1::text[])
+      )
+  )
+GROUP BY h.os_type, h.os_version
+ORDER BY count DESC, h.os_type, h.os_version`, excludedHostGroupIDs)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	out := []db.GetOSDistributionByTypeAndVersionRow{}
+	for rows.Next() {
+		var row db.GetOSDistributionByTypeAndVersionRow
+		if err := rows.Scan(&row.OsType, &row.OsVersion, &row.Name, &row.Count); err != nil {
+			return nil, err
+		}
+		out = append(out, row)
+	}
+	return out, rows.Err()
 }
 
 // GetHomepageStats returns statistics for the GetHomepage widget (matches Node backend structure).
@@ -504,10 +601,33 @@ func (s *DashboardStore) GetJobHistoryByApiID(ctx context.Context, apiID string,
 }
 
 // GetRecentCollection returns recent hosts by last_update.
-func (s *DashboardStore) GetRecentCollection(ctx context.Context, limit int) ([]map[string]interface{}, error) {
+func (s *DashboardStore) GetRecentCollection(ctx context.Context, limit int, excludedHostGroupIDs []string) ([]map[string]interface{}, error) {
 	d := s.db.DB(ctx)
-	rows, err := d.Queries.GetRecentHosts(ctx, safeconv.ClampToInt32(limit))
+	rowsRaw, err := d.Raw(ctx, `
+SELECT h.id, h.friendly_name, h.hostname, h.last_update, h.status
+FROM hosts h
+WHERE cardinality($2::text[]) = 0
+   OR NOT EXISTS (
+       SELECT 1
+       FROM host_group_memberships hgm
+       WHERE hgm.host_id = h.id
+         AND hgm.host_group_id = ANY($2::text[])
+   )
+ORDER BY h.last_update DESC
+LIMIT $1`, safeconv.ClampToInt32(limit), excludedHostGroupIDs)
 	if err != nil {
+		return nil, err
+	}
+	defer rowsRaw.Close()
+	rows := []db.GetRecentHostsRow{}
+	for rowsRaw.Next() {
+		var row db.GetRecentHostsRow
+		if err := rowsRaw.Scan(&row.ID, &row.FriendlyName, &row.Hostname, &row.LastUpdate, &row.Status); err != nil {
+			return nil, err
+		}
+		rows = append(rows, row)
+	}
+	if err := rowsRaw.Err(); err != nil {
 		return nil, err
 	}
 	result := make([]map[string]interface{}, len(rows))
@@ -534,7 +654,7 @@ type packageTrendPoint struct {
 
 // GetPackageTrends returns package trends data for the chart (matches Node backend structure).
 // Uses MAX aggregation per day for days > 1 to ensure spikes are visible.
-func (s *DashboardStore) GetPackageTrends(ctx context.Context, days int, hostID string) (map[string]interface{}, error) {
+func (s *DashboardStore) GetPackageTrends(ctx context.Context, days int, hostID string, excludedHostGroupIDs []string) (map[string]interface{}, error) {
 	d := s.db.DB(ctx)
 	if days <= 0 {
 		days = 30
@@ -552,8 +672,17 @@ func (s *DashboardStore) GetPackageTrends(ctx context.Context, days int, hostID 
 	var aggregated []packageTrendPoint
 
 	if needsAggregation {
+		if len(excludedHostGroupIDs) > 0 {
+			current, err := s.getCurrentPackageTrendPoint(ctx, endDate, excludedHostGroupIDs)
+			if err != nil {
+				return nil, err
+			}
+			aggregated = append(aggregated, current)
+			filled := s.fillMissingPeriods(aggregated, days)
+			return s.buildPackageTrendsResponse(ctx, filled, days, hostID, excludedHostGroupIDs)
+		}
 		if !s.tableExists(ctx, "system_statistics") {
-			return s.buildPackageTrendsResponse(ctx, []packageTrendPoint{}, days, "all")
+			return s.buildPackageTrendsResponse(ctx, []packageTrendPoint{}, days, "all", excludedHostGroupIDs)
 		}
 		if days <= 1 {
 			rows, err := d.Queries.ListSystemStatisticsByDateRange(ctx, db.ListSystemStatisticsByDateRangeParams{
@@ -615,7 +744,7 @@ func (s *DashboardStore) GetPackageTrends(ctx context.Context, days int, hostID 
 		}
 	} else {
 		if !s.tableExists(ctx, "update_history") {
-			return s.buildPackageTrendsResponse(ctx, []packageTrendPoint{}, days, hostID)
+			return s.buildPackageTrendsResponse(ctx, []packageTrendPoint{}, days, hostID, excludedHostGroupIDs)
 		}
 		if days <= 1 {
 			rows, err := d.Queries.ListUpdateHistoryByDateRange(ctx, db.ListUpdateHistoryByDateRangeParams{
@@ -686,7 +815,39 @@ func (s *DashboardStore) GetPackageTrends(ctx context.Context, days int, hostID 
 	}
 
 	filled := s.fillMissingPeriods(aggregated, days)
-	return s.buildPackageTrendsResponse(ctx, filled, days, hostID)
+	return s.buildPackageTrendsResponse(ctx, filled, days, hostID, excludedHostGroupIDs)
+}
+
+func (s *DashboardStore) getCurrentPackageTrendPoint(ctx context.Context, ts time.Time, excludedHostGroupIDs []string) (packageTrendPoint, error) {
+	d := s.db.DB(ctx)
+	var totalPackages, packagesCount, securityCount int
+	err := d.RawQueryRow(ctx, `
+WITH included_hosts AS (
+    SELECT h.id
+    FROM hosts h
+    WHERE cardinality($1::text[]) = 0
+       OR NOT EXISTS (
+           SELECT 1
+           FROM host_group_memberships hgm
+           WHERE hgm.host_id = h.id
+             AND hgm.host_group_id = ANY($1::text[])
+       )
+)
+SELECT
+    COUNT(*)::int AS total_packages,
+    COUNT(*) FILTER (WHERE hp.needs_update)::int AS packages_count,
+    COUNT(*) FILTER (WHERE hp.needs_update AND hp.is_security_update)::int AS security_count
+FROM host_packages hp
+JOIN included_hosts h ON h.id = hp.host_id`, excludedHostGroupIDs).Scan(&totalPackages, &packagesCount, &securityCount)
+	if err != nil {
+		return packageTrendPoint{}, err
+	}
+	return packageTrendPoint{
+		timeKey:       ts.Format("2006-01-02"),
+		totalPackages: totalPackages,
+		packagesCount: packagesCount,
+		securityCount: securityCount,
+	}, nil
 }
 
 func (s *DashboardStore) fillMissingPeriods(data []packageTrendPoint, daysInt int) []packageTrendPoint {
@@ -719,7 +880,7 @@ func (s *DashboardStore) fillMissingPeriods(data []packageTrendPoint, daysInt in
 	return filled
 }
 
-func (s *DashboardStore) buildPackageTrendsResponse(ctx context.Context, filled []packageTrendPoint, days int, hostID string) (map[string]interface{}, error) {
+func (s *DashboardStore) buildPackageTrendsResponse(ctx context.Context, filled []packageTrendPoint, days int, hostID string, excludedHostGroupIDs []string) (map[string]interface{}, error) {
 	d := s.db.DB(ctx)
 	hostIDOut := "all"
 	if hostID != "" && hostID != "all" && hostID != "undefined" {
@@ -781,7 +942,27 @@ func (s *DashboardStore) buildPackageTrendsResponse(ctx context.Context, filled 
 			},
 		},
 	}
-	hostsRows, _ := d.Queries.GetHostsForPackageTrends(ctx)
+	hostRowsRaw, _ := d.Raw(ctx, `
+SELECT h.id, h.friendly_name, h.hostname
+FROM hosts h
+WHERE cardinality($1::text[]) = 0
+   OR NOT EXISTS (
+       SELECT 1
+       FROM host_group_memberships hgm
+       WHERE hgm.host_id = h.id
+         AND hgm.host_group_id = ANY($1::text[])
+   )
+ORDER BY h.friendly_name ASC`, excludedHostGroupIDs)
+	hostsRows := []db.GetHostsForPackageTrendsRow{}
+	if hostRowsRaw != nil {
+		defer hostRowsRaw.Close()
+		for hostRowsRaw.Next() {
+			var row db.GetHostsForPackageTrendsRow
+			if err := hostRowsRaw.Scan(&row.ID, &row.FriendlyName, &row.Hostname); err == nil {
+				hostsRows = append(hostsRows, row)
+			}
+		}
+	}
 	hosts := make([]map[string]interface{}, len(hostsRows))
 	for i, h := range hostsRows {
 		hostname := ""
@@ -803,20 +984,31 @@ func (s *DashboardStore) buildPackageTrendsResponse(ctx context.Context, filled 
 			}
 		}
 	} else {
-		latest, err := d.Queries.GetLatestSystemStatistics(ctx)
-		if err == nil {
-			currentPackageState = map[string]interface{}{
-				"total_packages": latest.TotalPackages,
-				"packages_count": latest.UniquePackagesCount,
-				"security_count": latest.UniqueSecurityCount,
-			}
-		} else {
-			fallback, err := d.Queries.GetSystemStatsForInsert(ctx)
+		if len(excludedHostGroupIDs) > 0 {
+			current, err := s.getCurrentPackageTrendPoint(ctx, time.Now(), excludedHostGroupIDs)
 			if err == nil {
 				currentPackageState = map[string]interface{}{
-					"total_packages": fallback.Column3,
-					"packages_count": fallback.Column1,
-					"security_count": fallback.Column2,
+					"total_packages": current.totalPackages,
+					"packages_count": current.packagesCount,
+					"security_count": current.securityCount,
+				}
+			}
+		} else {
+			latest, err := d.Queries.GetLatestSystemStatistics(ctx)
+			if err == nil {
+				currentPackageState = map[string]interface{}{
+					"total_packages": latest.TotalPackages,
+					"packages_count": latest.UniquePackagesCount,
+					"security_count": latest.UniqueSecurityCount,
+				}
+			} else {
+				fallback, err := d.Queries.GetSystemStatsForInsert(ctx)
+				if err == nil {
+					currentPackageState = map[string]interface{}{
+						"total_packages": fallback.Column3,
+						"packages_count": fallback.Column1,
+						"security_count": fallback.Column2,
+					}
 				}
 			}
 		}
