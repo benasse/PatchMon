@@ -23,14 +23,12 @@ import { createPortal } from "react-dom";
 import { remoteAccessAPI } from "../utils/api";
 
 const statusStyles = {
-	connecting:
-		"bg-blue-100 text-blue-800 dark:bg-blue-950 dark:text-blue-200",
+	connecting: "bg-blue-100 text-blue-800 dark:bg-blue-950 dark:text-blue-200",
 	connected:
 		"bg-green-100 text-green-800 dark:bg-green-950 dark:text-green-200",
 	closed: "bg-slate-100 text-slate-800 dark:bg-slate-800 dark:text-slate-200",
 	failed: "bg-red-100 text-red-800 dark:bg-red-950 dark:text-red-200",
-	timeout:
-		"bg-amber-100 text-amber-800 dark:bg-amber-950 dark:text-amber-200",
+	timeout: "bg-amber-100 text-amber-800 dark:bg-amber-950 dark:text-amber-200",
 	agent_disconnected:
 		"bg-orange-100 text-orange-800 dark:bg-orange-950 dark:text-orange-200",
 };
@@ -356,7 +354,8 @@ const RemoteAccessSessions = () => {
 
 	const { data, isLoading, isFetching, refetch } = useQuery({
 		queryKey: ["remote-access-sessions", queryParams],
-		queryFn: () => remoteAccessAPI.listSessions(queryParams).then((r) => r.data),
+		queryFn: () =>
+			remoteAccessAPI.listSessions(queryParams).then((r) => r.data),
 		refetchInterval: 30000,
 	});
 
@@ -540,7 +539,9 @@ const RemoteAccessSessions = () => {
 														"not requested"}
 												</span>
 												{session.protocol === "ssh" &&
-												session.connection_mode === "guacd" &&
+												["guacd", "pty_agent"].includes(
+													session.connection_mode,
+												) &&
 												session.recording_name &&
 												session.status === "closed" ? (
 													<button

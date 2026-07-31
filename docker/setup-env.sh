@@ -52,6 +52,7 @@ cp env.example .env
 # Generate secrets: one 64-hex for JWT/SESSION/AI, one 32-hex for both passwords
 HEX64=$(openssl rand -hex 64)
 HEX32=$(openssl rand -hex 32)
+SSH_RECORDING_KEY=$(openssl rand -base64 32)
 
 # Inject 32-char secrets (same value for POSTGRES_PASSWORD and REDIS_PASSWORD)
 sed -i "s/^POSTGRES_PASSWORD=.*/POSTGRES_PASSWORD=$HEX32/" .env
@@ -61,6 +62,24 @@ sed -i "s/^REDIS_PASSWORD=.*/REDIS_PASSWORD=$HEX32/" .env
 sed -i "s/^JWT_SECRET=.*/JWT_SECRET=$HEX64/" .env
 sed -i "s/^AI_ENCRYPTION_KEY=.*/AI_ENCRYPTION_KEY=$HEX64/" .env
 sed -i "s/^SESSION_SECRET=.*/SESSION_SECRET=$HEX64/" .env
+sed -i "s|^SSH_RECORDING_KEY=.*|SSH_RECORDING_KEY=$SSH_RECORDING_KEY|" .env
+
+mkdir -p secrets
+chmod 700 secrets
+if command -v ssh-keygen >/dev/null 2>&1; then
+  if [ ! -f secrets/patchmon_ssh_host_key ]; then
+    ssh-keygen -q -t ed25519 -N "" -f secrets/patchmon_ssh_host_key
+  fi
+  if [ ! -f secrets/patchmon_ssh_ca_key ]; then
+    SSH_CA_PASSPHRASE=$(openssl rand -base64 32)
+    printf "%s" "$SSH_CA_PASSPHRASE" > secrets/patchmon_ssh_ca_passphrase
+    chmod 600 secrets/patchmon_ssh_ca_passphrase
+    ssh-keygen -q -t ed25519 -N "$SSH_CA_PASSPHRASE" -f secrets/patchmon_ssh_ca_key
+  fi
+  chmod 600 secrets/patchmon_ssh_host_key secrets/patchmon_ssh_ca_key 2>/dev/null || true
+else
+  echo "Warning: ssh-keygen not found; create docker/secrets/patchmon_ssh_* before enabling SSH_BASTION_ENABLED." >&2
+fi
 
 echo "Done. .env created with generated secrets."
 echo ""

@@ -10,6 +10,8 @@ INSERT INTO remote_access_sessions (
     user_agent,
     proxy_session_id,
     guacd_session_id,
+    linux_username,
+    client_type,
     recording_status,
     recording_path,
     recording_name
@@ -24,6 +26,8 @@ INSERT INTO remote_access_sessions (
     sqlc.narg('user_agent')::text,
     sqlc.narg('proxy_session_id')::text,
     sqlc.narg('guacd_session_id')::text,
+    sqlc.narg('linux_username')::text,
+    sqlc.narg('client_type')::text,
     sqlc.arg('recording_status')::text,
     sqlc.narg('recording_path')::text,
     sqlc.narg('recording_name')::text
@@ -55,6 +59,8 @@ WHERE (sqlc.arg('protocol')::text = '' OR ras.protocol = sqlc.arg('protocol')::t
       OR u.username ILIKE '%' || sqlc.arg('search')::text || '%'
       OR h.friendly_name ILIKE '%' || sqlc.arg('search')::text || '%'
       OR COALESCE(h.hostname, '') ILIKE '%' || sqlc.arg('search')::text || '%'
+      OR COALESCE(ras.linux_username, '') ILIKE '%' || sqlc.arg('search')::text || '%'
+      OR COALESCE(ras.client_type, '') ILIKE '%' || sqlc.arg('search')::text || '%'
       OR ras.connection_mode ILIKE '%' || sqlc.arg('search')::text || '%'
   );
 
@@ -76,6 +82,8 @@ WHERE (sqlc.arg('protocol')::text = '' OR ras.protocol = sqlc.arg('protocol')::t
       OR u.username ILIKE '%' || sqlc.arg('search')::text || '%'
       OR h.friendly_name ILIKE '%' || sqlc.arg('search')::text || '%'
       OR COALESCE(h.hostname, '') ILIKE '%' || sqlc.arg('search')::text || '%'
+      OR COALESCE(ras.linux_username, '') ILIKE '%' || sqlc.arg('search')::text || '%'
+      OR COALESCE(ras.client_type, '') ILIKE '%' || sqlc.arg('search')::text || '%'
       OR ras.connection_mode ILIKE '%' || sqlc.arg('search')::text || '%'
   )
 ORDER BY ras.started_at DESC
@@ -123,5 +131,41 @@ SET
     recording_path = sqlc.narg('recording_path')::text,
     recording_name = sqlc.narg('recording_name')::text,
     recording_size_bytes = sqlc.narg('recording_size_bytes')::bigint,
+    event_count = COALESCE(sqlc.narg('event_count')::bigint, event_count),
     updated_at = CURRENT_TIMESTAMP
 WHERE id = sqlc.arg('id')::text;
+
+-- name: CountActiveRemoteAccessSessionsForUser :one
+SELECT COUNT(*)::bigint
+FROM remote_access_sessions
+WHERE user_id = sqlc.arg('user_id')::text
+  AND protocol = 'ssh'
+  AND connection_mode IN ('pty_agent', 'agent_tunnel')
+  AND status IN ('connecting', 'connected');
+
+-- name: CountActiveRemoteAccessSessionsForHost :one
+SELECT COUNT(*)::bigint
+FROM remote_access_sessions
+WHERE host_id = sqlc.arg('host_id')::text
+  AND protocol = 'ssh'
+  AND connection_mode IN ('pty_agent', 'agent_tunnel')
+  AND status IN ('connecting', 'connected');
+
+-- name: MarkRemoteAccessRecordingDeleted :exec
+UPDATE remote_access_sessions
+SET
+    recording_deleted_at = CURRENT_TIMESTAMP,
+    recording_size_bytes = 0,
+    updated_at = CURRENT_TIMESTAMP
+WHERE id = sqlc.arg('id')::text;
+
+-- name: ListExpiredRemoteAccessRecordings :many
+SELECT *
+FROM remote_access_sessions
+WHERE protocol = 'ssh'
+  AND connection_mode = 'pty_agent'
+  AND recording_status = 'available'
+  AND recording_deleted_at IS NULL
+  AND started_at < sqlc.arg('started_before')::timestamp
+ORDER BY started_at
+LIMIT sqlc.arg('row_limit')::int;

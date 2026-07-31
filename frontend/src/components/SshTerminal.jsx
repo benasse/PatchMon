@@ -2,7 +2,6 @@ import { FitAddon } from "@xterm/addon-fit";
 import { Terminal } from "@xterm/xterm";
 import Guacamole from "guacamole-common-js";
 import { useCallback, useEffect, useRef, useState } from "react";
-import { useLocation } from "react-router-dom";
 import "@xterm/xterm/css/xterm.css";
 import { useQuery } from "@tanstack/react-query";
 import {
@@ -32,7 +31,6 @@ function sanitizeForLog(value) {
 }
 
 const SshTerminal = ({ host, isOpen, onClose, embedded = false }) => {
-	const location = useLocation();
 	const { setSidebarCollapsed, sidebarCollapsed } = useSidebar();
 	const previousSidebarStateRef = useRef(null);
 	const terminalRef = useRef(null);
@@ -84,7 +82,7 @@ const SshTerminal = ({ host, isOpen, onClose, embedded = false }) => {
 		passphrase: "",
 		port: 22,
 		authMethod: "password", // "password" or "key"
-		connectionMode: "guacd", // "guacd", "direct", or "proxy"
+		connectionMode: "direct", // "guacd", "direct", "proxy", or "pty_agent"
 		proxyHost: "localhost",
 		proxyPort: 22,
 	});
@@ -422,11 +420,19 @@ const SshTerminal = ({ host, isOpen, onClose, embedded = false }) => {
 		}
 
 		// Validate credentials based on auth method
-		if (sshConfig.authMethod === "password" && !sshConfig.password) {
+		if (
+			sshConfig.connectionMode !== "pty_agent" &&
+			sshConfig.authMethod === "password" &&
+			!sshConfig.password
+		) {
 			setError("Password is required");
 			return;
 		}
-		if (sshConfig.authMethod === "key" && !sshConfig.privateKey) {
+		if (
+			sshConfig.connectionMode !== "pty_agent" &&
+			sshConfig.authMethod === "key" &&
+			!sshConfig.privateKey
+		) {
 			setError("Private key is required");
 			return;
 		}
@@ -509,7 +515,9 @@ const SshTerminal = ({ host, isOpen, onClose, embedded = false }) => {
 					}
 
 					// Add authentication data based on selected method
-					if (sshConfig.authMethod === "password") {
+					if (sshConfig.connectionMode === "pty_agent") {
+						// pty_agent authenticates the Linux account locally on the agent.
+					} else if (sshConfig.authMethod === "password") {
 						connectData.password = sshConfig.password;
 					} else if (sshConfig.authMethod === "key") {
 						connectData.privateKey = sshConfig.privateKey;
@@ -743,7 +751,10 @@ const SshTerminal = ({ host, isOpen, onClose, embedded = false }) => {
 
 		let ticketData;
 		try {
-			const terminalWidth = Math.max(480, terminalRef.current?.clientWidth || 1024);
+			const terminalWidth = Math.max(
+				480,
+				terminalRef.current?.clientWidth || 1024,
+			);
 			const terminalHeight = Math.max(
 				320,
 				terminalRef.current?.clientHeight || 520,
@@ -926,7 +937,9 @@ const SshTerminal = ({ host, isOpen, onClose, embedded = false }) => {
 		setIdleWarning(false);
 
 		if (wsRef.current) {
-			wsRef.current.send(JSON.stringify({ type: "disconnect" }));
+			if (wsRef.current.readyState === WebSocket.OPEN) {
+				wsRef.current.send(JSON.stringify({ type: "disconnect" }));
+			}
 			wsRef.current.close();
 			wsRef.current = null;
 		}
@@ -1122,14 +1135,15 @@ const SshTerminal = ({ host, isOpen, onClose, embedded = false }) => {
 
 	useEffect(() => {
 		if (!embedded || !host?.id) return;
-		if (location.pathname.startsWith(`/hosts/${host.id}`)) return;
+		const pathname = window.location?.pathname || "";
+		if (pathname.startsWith(`/hosts/${host.id}`)) return;
 
 		handleDisconnect();
 		if (reconnectTimeoutRef.current) {
 			clearTimeout(reconnectTimeoutRef.current);
 			reconnectTimeoutRef.current = null;
 		}
-	}, [embedded, handleDisconnect, host?.id, location.pathname]);
+	}, [embedded, handleDisconnect, host?.id]);
 
 	const handleClose = () => {
 		handleDisconnect();
@@ -1335,6 +1349,24 @@ const SshTerminal = ({ host, isOpen, onClose, embedded = false }) => {
 										<Info className="h-3.5 w-3.5" />
 									</a>
 								</label>
+								<label className="flex items-center gap-2 cursor-pointer group">
+									<input
+										type="radio"
+										name="connectionMode"
+										value="pty_agent"
+										checked={sshConfig.connectionMode === "pty_agent"}
+										onChange={(e) =>
+											setSshConfig({
+												...sshConfig,
+												connectionMode: e.target.value,
+											})
+										}
+										className="text-primary-600 focus:ring-primary-500"
+									/>
+									<span className="text-xs font-medium text-secondary-300 group-hover:text-secondary-200 transition-colors">
+										PTY Agent
+									</span>
+								</label>
 							</div>
 
 							{/* Proxy Configuration (only shown when proxy mode selected) */}
@@ -1379,46 +1411,11 @@ const SshTerminal = ({ host, isOpen, onClose, embedded = false }) => {
 								</div>
 							)}
 
-							{/* Authentication Method Toggle */}
-							<div className="flex gap-6 mb-1">
-								<label className="flex items-center gap-2 cursor-pointer group">
-									<input
-										type="radio"
-										name="authMethod"
-										value="password"
-										checked={sshConfig.authMethod === "password"}
-										onChange={(e) =>
-											setSshConfig({ ...sshConfig, authMethod: e.target.value })
-										}
-										className="text-primary-600 focus:ring-primary-500"
-									/>
-									<span className="text-xs font-medium text-secondary-300 group-hover:text-secondary-200 transition-colors">
-										Password
-									</span>
-								</label>
-								<label className="flex items-center gap-2 cursor-pointer group">
-									<input
-										type="radio"
-										name="authMethod"
-										value="key"
-										checked={sshConfig.authMethod === "key"}
-										onChange={(e) =>
-											setSshConfig({ ...sshConfig, authMethod: e.target.value })
-										}
-										className="text-primary-600 focus:ring-primary-500"
-									/>
-									<span className="text-xs font-medium text-secondary-300 group-hover:text-secondary-200 transition-colors">
-										SSH Key
-									</span>
-								</label>
-							</div>
-
-							{/* Credentials Row - Username, Password, Port, Connect */}
-							{sshConfig.authMethod === "password" && (
+							{sshConfig.connectionMode === "pty_agent" && (
 								<div className="flex gap-3 items-end">
 									<div className="flex-1">
 										<label className="block text-xs font-medium text-secondary-300 mb-1">
-											Username
+											Linux Account
 										</label>
 										<input
 											type="text"
@@ -1429,171 +1426,257 @@ const SshTerminal = ({ host, isOpen, onClose, embedded = false }) => {
 											onBlur={(e) => saveUsername(e.target.value)}
 											autoComplete="username"
 											className="w-full px-3 py-2 text-sm bg-secondary-700 border border-secondary-600 rounded text-white focus:outline-none focus:ring-2 focus:ring-primary-500"
-											placeholder="root"
-											tabIndex="0"
-										/>
-									</div>
-									<div className="flex-1">
-										<label className="block text-xs font-medium text-secondary-300 mb-1">
-											Password
-										</label>
-										<input
-											type="password"
-											value={sshConfig.password}
-											onChange={(e) =>
-												setSshConfig({ ...sshConfig, password: e.target.value })
-											}
-											onKeyDown={(e) => {
-												if (e.key === "Enter" && sshConfig.password) {
-													connectSsh();
-												}
-											}}
-											className="w-full px-3 py-2 text-sm bg-secondary-700 border border-secondary-600 rounded text-white focus:outline-none focus:ring-2 focus:ring-primary-500"
-											placeholder="Password"
-											tabIndex="0"
-										/>
-									</div>
-									<div className="w-20">
-										<label className="block text-xs font-medium text-secondary-300 mb-1">
-											Port
-										</label>
-										<input
-											type="number"
-											value={sshConfig.port}
-											onChange={(e) =>
-												setSshConfig({
-													...sshConfig,
-													port: parseInt(e.target.value, 10) || 22,
-												})
-											}
-											className="w-full px-2 py-2 text-sm bg-secondary-700 border border-secondary-600 rounded text-white focus:outline-none focus:ring-2 focus:ring-primary-500"
-											placeholder="22"
-											tabIndex="0"
+											placeholder="deploy"
 										/>
 									</div>
 									<button
 										type="button"
 										onClick={connectSsh}
-										disabled={!sshConfig.username || !sshConfig.password}
-										className="px-4 py-2 text-sm bg-primary-600 hover:bg-primary-700 text-white font-medium rounded transition-all disabled:opacity-50 disabled:cursor-not-allowed whitespace-nowrap shadow-sm hover:shadow disabled:shadow-none"
+										className="px-6 py-2 text-sm font-medium bg-primary-600 hover:bg-primary-700 text-white rounded transition-colors flex items-center gap-2"
 										tabIndex="0"
 									>
+										<Play className="h-4 w-4" />
 										Connect
 									</button>
 								</div>
 							)}
 
-							{/* Username and Port Row for Key Auth */}
-							{sshConfig.authMethod === "key" && (
-								<div className="flex gap-3">
-									<div className="flex-1">
-										<label className="block text-xs font-medium text-secondary-300 mb-1">
-											Username
-										</label>
+							{/* Authentication Method Toggle */}
+							{sshConfig.connectionMode !== "pty_agent" && (
+								<div className="flex gap-6 mb-1">
+									<label className="flex items-center gap-2 cursor-pointer group">
 										<input
-											type="text"
-											value={sshConfig.username}
-											onChange={(e) =>
-												setSshConfig({ ...sshConfig, username: e.target.value })
-											}
-											onBlur={(e) => saveUsername(e.target.value)}
-											autoComplete="username"
-											className="w-full px-3 py-2 text-sm bg-secondary-700 border border-secondary-600 rounded text-white focus:outline-none focus:ring-2 focus:ring-primary-500"
-											placeholder="root"
-											tabIndex="0"
-										/>
-									</div>
-									<div className="w-20">
-										<label className="block text-xs font-medium text-secondary-300 mb-1">
-											Port
-										</label>
-										<input
-											type="number"
-											value={sshConfig.port}
+											type="radio"
+											name="authMethod"
+											value="password"
+											checked={sshConfig.authMethod === "password"}
 											onChange={(e) =>
 												setSshConfig({
 													...sshConfig,
-													port: parseInt(e.target.value, 10) || 22,
+													authMethod: e.target.value,
 												})
 											}
-											className="w-full px-2 py-2 text-sm bg-secondary-700 border border-secondary-600 rounded text-white focus:outline-none focus:ring-2 focus:ring-primary-500"
-											placeholder="22"
-											tabIndex="0"
+											className="text-primary-600 focus:ring-primary-500"
 										/>
-									</div>
+										<span className="text-xs font-medium text-secondary-300 group-hover:text-secondary-200 transition-colors">
+											Password
+										</span>
+									</label>
+									<label className="flex items-center gap-2 cursor-pointer group">
+										<input
+											type="radio"
+											name="authMethod"
+											value="key"
+											checked={sshConfig.authMethod === "key"}
+											onChange={(e) =>
+												setSshConfig({
+													...sshConfig,
+													authMethod: e.target.value,
+												})
+											}
+											className="text-primary-600 focus:ring-primary-500"
+										/>
+										<span className="text-xs font-medium text-secondary-300 group-hover:text-secondary-200 transition-colors">
+											SSH Key
+										</span>
+									</label>
 								</div>
 							)}
 
-							{/* SSH Key Authentication */}
-							{sshConfig.authMethod === "key" && (
-								<>
-									<div>
-										<label className="block text-xs font-medium text-secondary-300 mb-1">
-											Private Key
-										</label>
-										<textarea
-											value={sshConfig.privateKey}
-											onChange={(e) =>
-												setSshConfig({
-													...sshConfig,
-													privateKey: e.target.value,
-												})
-											}
-											className="w-full px-3 py-2 text-sm bg-secondary-700 border border-secondary-600 rounded text-white focus:outline-none focus:ring-2 focus:ring-primary-500 font-mono resize-none"
-											placeholder="-----BEGIN OPENSSH PRIVATE KEY-----&#10;...&#10;-----END OPENSSH PRIVATE KEY-----"
-											rows={4}
+							{/* Credentials Row - Username, Password, Port, Connect */}
+							{sshConfig.connectionMode !== "pty_agent" &&
+								sshConfig.authMethod === "password" && (
+									<div className="flex gap-3 items-end">
+										<div className="flex-1">
+											<label className="block text-xs font-medium text-secondary-300 mb-1">
+												Username
+											</label>
+											<input
+												type="text"
+												value={sshConfig.username}
+												onChange={(e) =>
+													setSshConfig({
+														...sshConfig,
+														username: e.target.value,
+													})
+												}
+												onBlur={(e) => saveUsername(e.target.value)}
+												autoComplete="username"
+												className="w-full px-3 py-2 text-sm bg-secondary-700 border border-secondary-600 rounded text-white focus:outline-none focus:ring-2 focus:ring-primary-500"
+												placeholder="root"
+												tabIndex="0"
+											/>
+										</div>
+										<div className="flex-1">
+											<label className="block text-xs font-medium text-secondary-300 mb-1">
+												Password
+											</label>
+											<input
+												type="password"
+												value={sshConfig.password}
+												onChange={(e) =>
+													setSshConfig({
+														...sshConfig,
+														password: e.target.value,
+													})
+												}
+												onKeyDown={(e) => {
+													if (e.key === "Enter" && sshConfig.password) {
+														connectSsh();
+													}
+												}}
+												className="w-full px-3 py-2 text-sm bg-secondary-700 border border-secondary-600 rounded text-white focus:outline-none focus:ring-2 focus:ring-primary-500"
+												placeholder="Password"
+												tabIndex="0"
+											/>
+										</div>
+										<div className="w-20">
+											<label className="block text-xs font-medium text-secondary-300 mb-1">
+												Port
+											</label>
+											<input
+												type="number"
+												value={sshConfig.port}
+												onChange={(e) =>
+													setSshConfig({
+														...sshConfig,
+														port: parseInt(e.target.value, 10) || 22,
+													})
+												}
+												className="w-full px-2 py-2 text-sm bg-secondary-700 border border-secondary-600 rounded text-white focus:outline-none focus:ring-2 focus:ring-primary-500"
+												placeholder="22"
+												tabIndex="0"
+											/>
+										</div>
+										<button
+											type="button"
+											onClick={connectSsh}
+											disabled={!sshConfig.username || !sshConfig.password}
+											className="px-4 py-2 text-sm bg-primary-600 hover:bg-primary-700 text-white font-medium rounded transition-all disabled:opacity-50 disabled:cursor-not-allowed whitespace-nowrap shadow-sm hover:shadow disabled:shadow-none"
 											tabIndex="0"
-										/>
-										<div className="mt-1 space-y-0.5">
-											<p className="text-xs text-secondary-400">
-												Paste your private SSH key here (supports encrypted
-												keys)
-											</p>
-											<p className="text-xs text-secondary-500 italic">
-												🔒 Security: Your private key is never stored. It's only
-												used in memory for the SSH connection and cleared when
-												you disconnect.
-											</p>
+										>
+											Connect
+										</button>
+									</div>
+								)}
+
+							{/* Username and Port Row for Key Auth */}
+							{sshConfig.connectionMode !== "pty_agent" &&
+								sshConfig.authMethod === "key" && (
+									<div className="flex gap-3">
+										<div className="flex-1">
+											<label className="block text-xs font-medium text-secondary-300 mb-1">
+												Username
+											</label>
+											<input
+												type="text"
+												value={sshConfig.username}
+												onChange={(e) =>
+													setSshConfig({
+														...sshConfig,
+														username: e.target.value,
+													})
+												}
+												onBlur={(e) => saveUsername(e.target.value)}
+												autoComplete="username"
+												className="w-full px-3 py-2 text-sm bg-secondary-700 border border-secondary-600 rounded text-white focus:outline-none focus:ring-2 focus:ring-primary-500"
+												placeholder="root"
+												tabIndex="0"
+											/>
+										</div>
+										<div className="w-20">
+											<label className="block text-xs font-medium text-secondary-300 mb-1">
+												Port
+											</label>
+											<input
+												type="number"
+												value={sshConfig.port}
+												onChange={(e) =>
+													setSshConfig({
+														...sshConfig,
+														port: parseInt(e.target.value, 10) || 22,
+													})
+												}
+												className="w-full px-2 py-2 text-sm bg-secondary-700 border border-secondary-600 rounded text-white focus:outline-none focus:ring-2 focus:ring-primary-500"
+												placeholder="22"
+												tabIndex="0"
+											/>
 										</div>
 									</div>
-									<div>
-										<label className="block text-xs font-medium text-secondary-300 mb-1">
-											Passphrase (if key is encrypted)
-										</label>
-										<input
-											type="password"
-											value={sshConfig.passphrase}
-											onChange={(e) =>
-												setSshConfig({
-													...sshConfig,
-													passphrase: e.target.value,
-												})
-											}
-											onKeyDown={(e) => {
-												if (e.key === "Enter" && sshConfig.privateKey) {
-													connectSsh();
+								)}
+
+							{/* SSH Key Authentication */}
+							{sshConfig.connectionMode !== "pty_agent" &&
+								sshConfig.authMethod === "key" && (
+									<>
+										<div>
+											<label className="block text-xs font-medium text-secondary-300 mb-1">
+												Private Key
+											</label>
+											<textarea
+												value={sshConfig.privateKey}
+												onChange={(e) =>
+													setSshConfig({
+														...sshConfig,
+														privateKey: e.target.value,
+													})
 												}
-											}}
-											className="w-full px-3 py-2 text-sm bg-secondary-700 border border-secondary-600 rounded text-white focus:outline-none focus:ring-2 focus:ring-primary-500"
-											placeholder="Passphrase (optional)"
-											tabIndex="0"
-										/>
-									</div>
-								</>
-							)}
+												className="w-full px-3 py-2 text-sm bg-secondary-700 border border-secondary-600 rounded text-white focus:outline-none focus:ring-2 focus:ring-primary-500 font-mono resize-none"
+												placeholder="-----BEGIN OPENSSH PRIVATE KEY-----&#10;...&#10;-----END OPENSSH PRIVATE KEY-----"
+												rows={4}
+												tabIndex="0"
+											/>
+											<div className="mt-1 space-y-0.5">
+												<p className="text-xs text-secondary-400">
+													Paste your private SSH key here (supports encrypted
+													keys)
+												</p>
+												<p className="text-xs text-secondary-500 italic">
+													🔒 Security: Your private key is never stored. It's
+													only used in memory for the SSH connection and cleared
+													when you disconnect.
+												</p>
+											</div>
+										</div>
+										<div>
+											<label className="block text-xs font-medium text-secondary-300 mb-1">
+												Passphrase (if key is encrypted)
+											</label>
+											<input
+												type="password"
+												value={sshConfig.passphrase}
+												onChange={(e) =>
+													setSshConfig({
+														...sshConfig,
+														passphrase: e.target.value,
+													})
+												}
+												onKeyDown={(e) => {
+													if (e.key === "Enter" && sshConfig.privateKey) {
+														connectSsh();
+													}
+												}}
+												className="w-full px-3 py-2 text-sm bg-secondary-700 border border-secondary-600 rounded text-white focus:outline-none focus:ring-2 focus:ring-primary-500"
+												placeholder="Passphrase (optional)"
+												tabIndex="0"
+											/>
+										</div>
+									</>
+								)}
 
 							{/* Connect Button for Key Auth */}
-							{sshConfig.authMethod === "key" && (
-								<button
-									type="button"
-									onClick={connectSsh}
-									disabled={!sshConfig.username || !sshConfig.privateKey}
-									className="w-full px-4 py-2 text-sm bg-primary-600 hover:bg-primary-700 text-white font-medium rounded transition-all disabled:opacity-50 disabled:cursor-not-allowed shadow-sm hover:shadow disabled:shadow-none"
-									tabIndex="0"
-								>
-									Connect
-								</button>
-							)}
+							{sshConfig.connectionMode !== "pty_agent" &&
+								sshConfig.authMethod === "key" && (
+									<button
+										type="button"
+										onClick={connectSsh}
+										disabled={!sshConfig.username || !sshConfig.privateKey}
+										className="w-full px-4 py-2 text-sm bg-primary-600 hover:bg-primary-700 text-white font-medium rounded transition-all disabled:opacity-50 disabled:cursor-not-allowed shadow-sm hover:shadow disabled:shadow-none"
+										tabIndex="0"
+									>
+										Connect
+									</button>
+								)}
 						</div>
 					</div>
 				)}
@@ -1838,7 +1921,7 @@ const SshTerminal = ({ host, isOpen, onClose, embedded = false }) => {
 				</div>
 
 				{/* Connection Form (shown when not connected) */}
-							{!isConnected && !isConnecting && (
+				{!isConnected && !isConnecting && (
 					<div className="p-6 border-b border-secondary-700 bg-secondary-800 flex-shrink-0">
 						<div className="max-w-2xl mx-auto space-y-4">
 							{error && (
@@ -1901,11 +1984,37 @@ const SshTerminal = ({ host, isOpen, onClose, embedded = false }) => {
 										Proxy via Agent
 									</span>
 								</label>
+								<label className="flex items-center gap-2 cursor-pointer group">
+									<input
+										type="radio"
+										name="modalConnectionMode"
+										value="pty_agent"
+										checked={sshConfig.connectionMode === "pty_agent"}
+										onChange={(e) =>
+											setSshConfig({
+												...sshConfig,
+												connectionMode: e.target.value,
+											})
+										}
+										className="text-primary-600 focus:ring-primary-500"
+									/>
+									<span className="text-sm font-medium text-secondary-300 group-hover:text-secondary-200 transition-colors">
+										PTY Agent
+									</span>
+								</label>
 							</div>
-							<div className="grid grid-cols-2 gap-4">
+							<div
+								className={
+									sshConfig.connectionMode === "pty_agent"
+										? "grid grid-cols-1 gap-4"
+										: "grid grid-cols-2 gap-4"
+								}
+							>
 								<div>
 									<label className="block text-sm font-medium text-secondary-300 mb-1">
-										Username
+										{sshConfig.connectionMode === "pty_agent"
+											? "Linux Account"
+											: "Username"}
 									</label>
 									<input
 										type="text"
@@ -1916,50 +2025,62 @@ const SshTerminal = ({ host, isOpen, onClose, embedded = false }) => {
 										onBlur={(e) => saveUsername(e.target.value)}
 										autoComplete="username"
 										className="w-full px-3 py-2 bg-secondary-700 border border-secondary-600 rounded text-white focus:outline-none focus:ring-2 focus:ring-primary-500"
-										placeholder="root"
+										placeholder={
+											sshConfig.connectionMode === "pty_agent"
+												? "deploy"
+												: "root"
+										}
 									/>
 								</div>
+								{sshConfig.connectionMode !== "pty_agent" && (
+									<div>
+										<label className="block text-sm font-medium text-secondary-300 mb-1">
+											Port
+										</label>
+										<input
+											type="number"
+											value={sshConfig.port}
+											onChange={(e) =>
+												setSshConfig({
+													...sshConfig,
+													port: parseInt(e.target.value, 10) || 22,
+												})
+											}
+											className="w-full px-3 py-2 bg-secondary-700 border border-secondary-600 rounded text-white focus:outline-none focus:ring-2 focus:ring-primary-500"
+											placeholder="22"
+										/>
+									</div>
+								)}
+							</div>
+							{sshConfig.connectionMode !== "pty_agent" && (
 								<div>
 									<label className="block text-sm font-medium text-secondary-300 mb-1">
-										Port
+										Password
 									</label>
 									<input
-										type="number"
-										value={sshConfig.port}
+										type="password"
+										value={sshConfig.password}
 										onChange={(e) =>
-											setSshConfig({
-												...sshConfig,
-												port: parseInt(e.target.value, 10) || 22,
-											})
+											setSshConfig({ ...sshConfig, password: e.target.value })
 										}
+										onKeyDown={(e) => {
+											if (e.key === "Enter" && sshConfig.password) {
+												connectSsh();
+											}
+										}}
 										className="w-full px-3 py-2 bg-secondary-700 border border-secondary-600 rounded text-white focus:outline-none focus:ring-2 focus:ring-primary-500"
-										placeholder="22"
+										placeholder="Enter SSH password"
 									/>
 								</div>
-							</div>
-							<div>
-								<label className="block text-sm font-medium text-secondary-300 mb-1">
-									Password
-								</label>
-								<input
-									type="password"
-									value={sshConfig.password}
-									onChange={(e) =>
-										setSshConfig({ ...sshConfig, password: e.target.value })
-									}
-									onKeyDown={(e) => {
-										if (e.key === "Enter" && sshConfig.password) {
-											connectSsh();
-										}
-									}}
-									className="w-full px-3 py-2 bg-secondary-700 border border-secondary-600 rounded text-white focus:outline-none focus:ring-2 focus:ring-primary-500"
-									placeholder="Enter SSH password"
-								/>
-							</div>
+							)}
 							<button
 								type="button"
 								onClick={connectSsh}
-								disabled={!sshConfig.username || !sshConfig.password}
+								disabled={
+									!sshConfig.username ||
+									(sshConfig.connectionMode !== "pty_agent" &&
+										!sshConfig.password)
+								}
 								className="w-full px-4 py-2 bg-primary-600 hover:bg-primary-700 text-white font-medium rounded transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
 							>
 								Connect

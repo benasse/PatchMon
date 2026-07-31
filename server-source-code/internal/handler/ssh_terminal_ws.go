@@ -3,6 +3,7 @@ package handler
 import (
 	"context"
 	"crypto/rand"
+	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -14,10 +15,14 @@ import (
 	"regexp"
 	"strconv"
 	"sync"
+	"time"
 
 	"github.com/PatchMon/PatchMon/server-source-code/internal/agentregistry"
 	"github.com/PatchMon/PatchMon/server-source-code/internal/clientip"
+	hostctx "github.com/PatchMon/PatchMon/server-source-code/internal/context"
 	"github.com/PatchMon/PatchMon/server-source-code/internal/models"
+	"github.com/PatchMon/PatchMon/server-source-code/internal/sessionrecording"
+	"github.com/PatchMon/PatchMon/server-source-code/internal/sshbastion"
 	"github.com/PatchMon/PatchMon/server-source-code/internal/sshproxy"
 	"github.com/PatchMon/PatchMon/server-source-code/internal/store"
 	"github.com/gorilla/websocket"
@@ -54,6 +59,8 @@ type SshTerminalWSHandler struct {
 	registry    *agentregistry.Registry
 	proxySess   *sshproxy.Sessions
 	remote      *store.RemoteAccessSessionsStore
+	ptyBroker   *sshbastion.Broker
+	recordings  *sessionrecording.Store
 	upgrader    websocket.Upgrader
 	log         *slog.Logger
 }
@@ -86,6 +93,12 @@ func NewSshTerminalWSHandler(
 			},
 		},
 	}
+}
+
+// EnablePTYAgent wires the pty_agent broker and encrypted recording store.
+func (h *SshTerminalWSHandler) EnablePTYAgent(broker *sshbastion.Broker, recordings *sessionrecording.Store) {
+	h.ptyBroker = broker
+	h.recordings = recordings
 }
 
 // ServeWS handles GET /api/v1/ssh-terminal/:hostId?ticket=xxx
@@ -154,6 +167,7 @@ func (h *SshTerminalWSHandler) handleConnection(ctx context.Context, conn *webso
 	var sshSession *ssh.Session
 	var sshStdin io.WriteCloser
 	var proxySessionID string
+	var ptyAgentSessionID string
 	var remoteAccessSessionID string
 	var mu sync.Mutex
 	auditCtx := context.WithoutCancel(ctx)
@@ -179,6 +193,10 @@ func (h *SshTerminalWSHandler) handleConnection(ctx context.Context, conn *webso
 			})
 			h.proxySess.Delete(proxySessionID)
 			proxySessionID = ""
+		}
+		if ptyAgentSessionID != "" {
+			_ = h.ptyBroker.ClosePTY(host.ApiID, ptyAgentSessionID)
+			ptyAgentSessionID = ""
 		}
 		if sshSession != nil {
 			_ = sshSession.Close()
@@ -227,7 +245,7 @@ func (h *SshTerminalWSHandler) handleConnection(ctx context.Context, conn *webso
 		switch msg.Type {
 		case "connect":
 			mu.Lock()
-			hasConn := sshClient != nil || proxySessionID != ""
+			hasConn := sshClient != nil || proxySessionID != "" || ptyAgentSessionID != ""
 			mu.Unlock()
 			if hasConn {
 				send(map[string]string{"type": "error", "message": "Already connected"})
@@ -238,10 +256,34 @@ func (h *SshTerminalWSHandler) handleConnection(ctx context.Context, conn *webso
 			if connectionMode == "" {
 				connectionMode = "direct"
 			}
-			sessionID := h.createRemoteAccessSession(auditCtx, host, user, connectionMode, browserIP, userAgent)
+			sessionID := h.createRemoteAccessSession(auditCtx, host, user, connectionMode, msg.Username, browserIP, userAgent)
 			mu.Lock()
 			remoteAccessSessionID = sessionID
 			mu.Unlock()
+
+			if connectionMode == "pty_agent" {
+				if h.ptyBroker == nil || h.recordings == nil {
+					h.markRemoteAccessEnded(auditCtx, sessionID, store.RemoteAccessStatusFailed, strPtr("pty_agent is not configured"))
+					send(map[string]string{"type": "error", "message": "pty_agent is not configured on this server"})
+					continue
+				}
+				if msg.Username == "" || msg.Username == "root" {
+					h.markRemoteAccessEnded(auditCtx, sessionID, store.RemoteAccessStatusFailed, strPtr("Invalid Linux account"))
+					send(map[string]string{"type": "error", "message": "A non-root Linux account is required"})
+					continue
+				}
+				mu.Lock()
+				ptyAgentSessionID = sessionID
+				mu.Unlock()
+				if err := h.startPTYAgentSession(auditCtx, conn, host, sessionID, msg.Username, orDefault(msg.Terminal, "xterm-256color"), orInt(msg.Cols, 80), orInt(msg.Rows, 24), send); err != nil {
+					mu.Lock()
+					ptyAgentSessionID = ""
+					mu.Unlock()
+					h.markRemoteAccessEnded(auditCtx, sessionID, store.RemoteAccessStatusFailed, strPtr(err.Error()))
+					send(map[string]string{"type": "error", "message": err.Error()})
+				}
+				continue
+			}
 
 			if connectionMode == "proxy" {
 				if !h.registry.Get(host.ApiID).Connected {
@@ -485,6 +527,8 @@ func (h *SshTerminalWSHandler) handleConnection(ctx context.Context, conn *webso
 					"session_id": pid,
 					"data":       msg.Data,
 				})
+			} else if ptyAgentSessionID != "" {
+				_ = h.ptyBroker.PTYInput(host.ApiID, ptyAgentSessionID, uint64(time.Now().UnixNano()), []byte(msg.Data))
 			} else if sid != nil {
 				_, _ = sid.Write([]byte(msg.Data))
 			}
@@ -500,6 +544,8 @@ func (h *SshTerminalWSHandler) handleConnection(ctx context.Context, conn *webso
 					"cols":       orInt(msg.Cols, 80),
 					"rows":       orInt(msg.Rows, 24),
 				})
+			} else if ptyAgentSessionID != "" {
+				_ = h.ptyBroker.PTYResize(host.ApiID, ptyAgentSessionID, orInt(msg.Cols, 80), orInt(msg.Rows, 24))
 			}
 			// Direct mode: ssh session doesn't support resize after start easily; skip
 
@@ -508,6 +554,86 @@ func (h *SshTerminalWSHandler) handleConnection(ctx context.Context, conn *webso
 			return
 		}
 	}
+}
+
+func (h *SshTerminalWSHandler) startPTYAgentSession(ctx context.Context, conn *websocket.Conn, host *models.Host, sessionID, linuxUsername, terminal string, cols, rows int, send func(interface{})) error {
+	if h.ptyBroker == nil || h.recordings == nil {
+		return errors.New("pty_agent is not configured")
+	}
+	if !h.registry.IsConnected(host.ApiID) {
+		return errors.New("Agent WebSocket connection lost")
+	}
+	startedAt := time.Now()
+	tenantID := sshbastion.TenantStorageID(hostctx.TenantHostKey(ctx))
+	writer, err := h.recordings.NewWriter(ctx, tenantID, sessionID, startedAt)
+	if err != nil {
+		return errors.New("Failed to initialize session recording")
+	}
+	var recordingMu sync.Mutex
+	var eventCount int64
+	var finishOnce sync.Once
+	recordEvent := func(event sessionrecording.Event) {
+		recordingMu.Lock()
+		defer recordingMu.Unlock()
+		event.OffsetMicros = time.Since(startedAt).Microseconds()
+		if writer.Append(ctx, event) == nil {
+			eventCount++
+		}
+	}
+	finish := func(status, reason string) {
+		finishOnce.Do(func() {
+			recordingMu.Lock()
+			_ = writer.Close()
+			events := eventCount
+			recordingMu.Unlock()
+			remoteStatus := store.RemoteAccessStatusClosed
+			if status == "failed" {
+				remoteStatus = store.RemoteAccessStatusFailed
+			}
+			var reasonPtr *string
+			if reason != "" {
+				reasonPtr = &reason
+			}
+			h.markRemoteAccessEnded(ctx, sessionID, remoteStatus, reasonPtr)
+			_ = h.remote.SetRecordingWithEventCount(ctx, sessionID, store.RecordingStatusAvailable, nil, &sessionID, nil, &events)
+		})
+	}
+	recordEvent(sessionrecording.Event{Type: "marker", Data: "opening"})
+	recordEvent(sessionrecording.Event{Type: "resize", Cols: cols, Rows: rows})
+	callback := func(message sshbastion.Message) {
+		switch message.Type {
+		case "pty_opened":
+			recordEvent(sessionrecording.Event{Type: "marker", Data: "connected"})
+			h.markRemoteAccessConnected(ctx, sessionID)
+			send(map[string]string{"type": "connected"})
+		case "pty_output":
+			data, err := base64.StdEncoding.DecodeString(message.Data)
+			if err != nil {
+				finish("failed", "invalid agent output")
+				send(map[string]interface{}{"type": "error", "message": "Invalid agent output"})
+				return
+			}
+			text := string(data)
+			recordEvent(sessionrecording.Event{Type: "output", Data: text})
+			send(map[string]interface{}{"type": "data", "data": text})
+		case "pty_error":
+			reason := message.Message
+			if reason == "" {
+				reason = "pty_agent failed"
+			}
+			finish("failed", reason)
+			send(map[string]interface{}{"type": "error", "message": reason})
+		case "pty_closed", "pty_exited":
+			finish("completed", "")
+			send(map[string]string{"type": "closed"})
+		}
+	}
+	if err := h.ptyBroker.OpenPTY(host.ApiID, sessionID, linuxUsername, terminal, cols, rows, callback); err != nil {
+		_ = writer.Close()
+		return errors.New("Failed to send pty_agent request to agent")
+	}
+	_ = conn.SetReadDeadline(time.Time{})
+	return nil
 }
 
 // HandleAgentMessage forwards SSH proxy messages from agent to frontend.
@@ -553,7 +679,7 @@ func (h *SshTerminalWSHandler) HandleAgentMessage(apiID string, raw []byte) {
 	}
 }
 
-func (h *SshTerminalWSHandler) createRemoteAccessSession(ctx context.Context, host *models.Host, user *models.User, mode, browserIP, userAgent string) string {
+func (h *SshTerminalWSHandler) createRemoteAccessSession(ctx context.Context, host *models.Host, user *models.User, mode, linuxUsername, browserIP, userAgent string) string {
 	if h.remote == nil || host == nil || user == nil {
 		return ""
 	}
@@ -565,6 +691,11 @@ func (h *SshTerminalWSHandler) createRemoteAccessSession(ctx context.Context, ho
 	if userAgent != "" {
 		uaPtr = &userAgent
 	}
+	var linuxPtr *string
+	if linuxUsername != "" {
+		linuxPtr = &linuxUsername
+	}
+	clientType := "web"
 	session, err := h.remote.Create(ctx, store.CreateRemoteAccessSessionParams{
 		UserID:          user.ID,
 		HostID:          host.ID,
@@ -572,6 +703,8 @@ func (h *SshTerminalWSHandler) createRemoteAccessSession(ctx context.Context, ho
 		ConnectionMode:  mode,
 		BrowserIP:       ipPtr,
 		UserAgent:       uaPtr,
+		LinuxUsername:   linuxPtr,
+		ClientType:      &clientType,
 		RecordingStatus: store.RecordingStatusNotRequested,
 	})
 	if err != nil {

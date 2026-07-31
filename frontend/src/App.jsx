@@ -25,9 +25,9 @@ import Hosts from "./pages/Hosts";
 import Login from "./pages/Login";
 import Packages from "./pages/Packages";
 import Patching from "./pages/Patching";
+import RemoteAccessSessions from "./pages/RemoteAccessSessions";
 import Reporting from "./pages/Reporting";
 import Repositories from "./pages/Repositories";
-import RemoteAccessSessions from "./pages/RemoteAccessSessions";
 import SettingsUsers from "./pages/settings/SettingsUsers";
 
 // Lazy load detail/settings pages (less frequently navigated)

@@ -96,6 +96,8 @@ type Querier interface {
 	ClearHostDockerHashOnEnable(ctx context.Context, arg ClearHostDockerHashOnEnableParams) error
 	ClearScheduledAt(ctx context.Context, id string) error
 	CountActiveAdmins(ctx context.Context) (int64, error)
+	CountActiveRemoteAccessSessionsForHost(ctx context.Context, hostID string) (int64, error)
+	CountActiveRemoteAccessSessionsForUser(ctx context.Context, userID string) (int64, error)
 	CountActiveRepositories(ctx context.Context) (int32, error)
 	CountAdmins(ctx context.Context) (int64, error)
 	// Agent Activity feed. Returns the merged time-ordered stream of agent comm
@@ -432,6 +434,7 @@ type Querier interface {
 	ListDashboardPreferencesByUserID(ctx context.Context, userID string) ([]DashboardPreference, error)
 	ListDockerHostsPaginated(ctx context.Context, arg ListDockerHostsPaginatedParams) ([]ListDockerHostsPaginatedRow, error)
 	ListExistingHostApiIDs(ctx context.Context, dollar_1 []string) ([]string, error)
+	ListExpiredRemoteAccessRecordings(ctx context.Context, arg ListExpiredRemoteAccessRecordingsParams) ([]RemoteAccessSession, error)
 	ListHostApiIDs(ctx context.Context) ([]string, error)
 	ListHostGroups(ctx context.Context) ([]HostGroup, error)
 	ListHostGroupsWithHostCount(ctx context.Context) ([]ListHostGroupsWithHostCountRow, error)
@@ -498,6 +501,7 @@ type Querier interface {
 	// every long run timed_out while it was still working and discard the real
 	// outcome the agent later reports.
 	MarkPatchRunsTimedOut(ctx context.Context, arg MarkPatchRunsTimedOutParams) (int64, error)
+	MarkRemoteAccessRecordingDeleted(ctx context.Context, id string) error
 	MarkRemoteAccessSessionConnected(ctx context.Context, id string) error
 	MarkRemoteAccessSessionEnded(ctx context.Context, arg MarkRemoteAccessSessionEndedParams) error
 	MarkValidationApproved(ctx context.Context, arg MarkValidationApprovedParams) error

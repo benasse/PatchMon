@@ -513,6 +513,10 @@ type RemoteAccessSession struct {
 	UserAgent          *string          `json:"user_agent"`
 	ProxySessionID     *string          `json:"proxy_session_id"`
 	GuacdSessionID     *string          `json:"guacd_session_id"`
+	LinuxUsername      *string          `json:"linux_username"`
+	ClientType         *string          `json:"client_type"`
+	EventCount         int64            `json:"event_count"`
+	RecordingDeletedAt pgtype.Timestamp `json:"recording_deleted_at"`
 	RecordingStatus    string           `json:"recording_status"`
 	RecordingPath      *string          `json:"recording_path"`
 	RecordingName      *string          `json:"recording_name"`

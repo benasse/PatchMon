@@ -11,6 +11,38 @@ import (
 	"github.com/jackc/pgx/v5/pgtype"
 )
 
+const countActiveRemoteAccessSessionsForHost = `-- name: CountActiveRemoteAccessSessionsForHost :one
+SELECT COUNT(*)::bigint
+FROM remote_access_sessions
+WHERE host_id = $1::text
+  AND protocol = 'ssh'
+  AND connection_mode IN ('pty_agent', 'agent_tunnel')
+  AND status IN ('connecting', 'connected')
+`
+
+func (q *Queries) CountActiveRemoteAccessSessionsForHost(ctx context.Context, hostID string) (int64, error) {
+	row := q.db.QueryRow(ctx, countActiveRemoteAccessSessionsForHost, hostID)
+	var column_1 int64
+	err := row.Scan(&column_1)
+	return column_1, err
+}
+
+const countActiveRemoteAccessSessionsForUser = `-- name: CountActiveRemoteAccessSessionsForUser :one
+SELECT COUNT(*)::bigint
+FROM remote_access_sessions
+WHERE user_id = $1::text
+  AND protocol = 'ssh'
+  AND connection_mode IN ('pty_agent', 'agent_tunnel')
+  AND status IN ('connecting', 'connected')
+`
+
+func (q *Queries) CountActiveRemoteAccessSessionsForUser(ctx context.Context, userID string) (int64, error) {
+	row := q.db.QueryRow(ctx, countActiveRemoteAccessSessionsForUser, userID)
+	var column_1 int64
+	err := row.Scan(&column_1)
+	return column_1, err
+}
+
 const countRemoteAccessSessions = `-- name: CountRemoteAccessSessions :one
 SELECT COUNT(*)::int
 FROM remote_access_sessions ras
@@ -25,6 +57,8 @@ WHERE ($1::text = '' OR ras.protocol = $1::text)
       OR u.username ILIKE '%' || $5::text || '%'
       OR h.friendly_name ILIKE '%' || $5::text || '%'
       OR COALESCE(h.hostname, '') ILIKE '%' || $5::text || '%'
+      OR COALESCE(ras.linux_username, '') ILIKE '%' || $5::text || '%'
+      OR COALESCE(ras.client_type, '') ILIKE '%' || $5::text || '%'
       OR ras.connection_mode ILIKE '%' || $5::text || '%'
   )
 `
@@ -62,6 +96,8 @@ INSERT INTO remote_access_sessions (
     user_agent,
     proxy_session_id,
     guacd_session_id,
+    linux_username,
+    client_type,
     recording_status,
     recording_path,
     recording_name
@@ -78,9 +114,11 @@ INSERT INTO remote_access_sessions (
     $9::text,
     $10::text,
     $11::text,
-    $12::text
+    $12::text,
+    $13::text,
+    $14::text
 )
-RETURNING id, user_id, host_id, protocol, connection_mode, status, started_at, connected_at, ended_at, error_message, browser_ip, user_agent, proxy_session_id, guacd_session_id, recording_status, recording_path, recording_name, recording_size_bytes, created_at, updated_at
+RETURNING id, user_id, host_id, protocol, connection_mode, status, started_at, connected_at, ended_at, error_message, browser_ip, user_agent, proxy_session_id, guacd_session_id, linux_username, client_type, event_count, recording_deleted_at, recording_status, recording_path, recording_name, recording_size_bytes, created_at, updated_at
 `
 
 type CreateRemoteAccessSessionParams struct {
@@ -93,6 +131,8 @@ type CreateRemoteAccessSessionParams struct {
 	UserAgent       *string `json:"user_agent"`
 	ProxySessionID  *string `json:"proxy_session_id"`
 	GuacdSessionID  *string `json:"guacd_session_id"`
+	LinuxUsername   *string `json:"linux_username"`
+	ClientType      *string `json:"client_type"`
 	RecordingStatus string  `json:"recording_status"`
 	RecordingPath   *string `json:"recording_path"`
 	RecordingName   *string `json:"recording_name"`
@@ -109,6 +149,8 @@ func (q *Queries) CreateRemoteAccessSession(ctx context.Context, arg CreateRemot
 		arg.UserAgent,
 		arg.ProxySessionID,
 		arg.GuacdSessionID,
+		arg.LinuxUsername,
+		arg.ClientType,
 		arg.RecordingStatus,
 		arg.RecordingPath,
 		arg.RecordingName,
@@ -129,6 +171,10 @@ func (q *Queries) CreateRemoteAccessSession(ctx context.Context, arg CreateRemot
 		&i.UserAgent,
 		&i.ProxySessionID,
 		&i.GuacdSessionID,
+		&i.LinuxUsername,
+		&i.ClientType,
+		&i.EventCount,
+		&i.RecordingDeletedAt,
 		&i.RecordingStatus,
 		&i.RecordingPath,
 		&i.RecordingName,
@@ -141,7 +187,7 @@ func (q *Queries) CreateRemoteAccessSession(ctx context.Context, arg CreateRemot
 
 const getRemoteAccessSession = `-- name: GetRemoteAccessSession :one
 SELECT
-    ras.id, ras.user_id, ras.host_id, ras.protocol, ras.connection_mode, ras.status, ras.started_at, ras.connected_at, ras.ended_at, ras.error_message, ras.browser_ip, ras.user_agent, ras.proxy_session_id, ras.guacd_session_id, ras.recording_status, ras.recording_path, ras.recording_name, ras.recording_size_bytes, ras.created_at, ras.updated_at,
+    ras.id, ras.user_id, ras.host_id, ras.protocol, ras.connection_mode, ras.status, ras.started_at, ras.connected_at, ras.ended_at, ras.error_message, ras.browser_ip, ras.user_agent, ras.proxy_session_id, ras.guacd_session_id, ras.linux_username, ras.client_type, ras.event_count, ras.recording_deleted_at, ras.recording_status, ras.recording_path, ras.recording_name, ras.recording_size_bytes, ras.created_at, ras.updated_at,
     u.username AS user_username,
     h.friendly_name AS host_friendly_name,
     h.hostname AS host_hostname
@@ -166,6 +212,10 @@ type GetRemoteAccessSessionRow struct {
 	UserAgent          *string          `json:"user_agent"`
 	ProxySessionID     *string          `json:"proxy_session_id"`
 	GuacdSessionID     *string          `json:"guacd_session_id"`
+	LinuxUsername      *string          `json:"linux_username"`
+	ClientType         *string          `json:"client_type"`
+	EventCount         int64            `json:"event_count"`
+	RecordingDeletedAt pgtype.Timestamp `json:"recording_deleted_at"`
 	RecordingStatus    string           `json:"recording_status"`
 	RecordingPath      *string          `json:"recording_path"`
 	RecordingName      *string          `json:"recording_name"`
@@ -195,6 +245,10 @@ func (q *Queries) GetRemoteAccessSession(ctx context.Context, id string) (GetRem
 		&i.UserAgent,
 		&i.ProxySessionID,
 		&i.GuacdSessionID,
+		&i.LinuxUsername,
+		&i.ClientType,
+		&i.EventCount,
+		&i.RecordingDeletedAt,
 		&i.RecordingStatus,
 		&i.RecordingPath,
 		&i.RecordingName,
@@ -208,9 +262,71 @@ func (q *Queries) GetRemoteAccessSession(ctx context.Context, id string) (GetRem
 	return i, err
 }
 
+const listExpiredRemoteAccessRecordings = `-- name: ListExpiredRemoteAccessRecordings :many
+SELECT id, user_id, host_id, protocol, connection_mode, status, started_at, connected_at, ended_at, error_message, browser_ip, user_agent, proxy_session_id, guacd_session_id, linux_username, client_type, event_count, recording_deleted_at, recording_status, recording_path, recording_name, recording_size_bytes, created_at, updated_at
+FROM remote_access_sessions
+WHERE protocol = 'ssh'
+  AND connection_mode = 'pty_agent'
+  AND recording_status = 'available'
+  AND recording_deleted_at IS NULL
+  AND started_at < $1::timestamp
+ORDER BY started_at
+LIMIT $2::int
+`
+
+type ListExpiredRemoteAccessRecordingsParams struct {
+	StartedBefore pgtype.Timestamp `json:"started_before"`
+	RowLimit      int32            `json:"row_limit"`
+}
+
+func (q *Queries) ListExpiredRemoteAccessRecordings(ctx context.Context, arg ListExpiredRemoteAccessRecordingsParams) ([]RemoteAccessSession, error) {
+	rows, err := q.db.Query(ctx, listExpiredRemoteAccessRecordings, arg.StartedBefore, arg.RowLimit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []RemoteAccessSession
+	for rows.Next() {
+		var i RemoteAccessSession
+		if err := rows.Scan(
+			&i.ID,
+			&i.UserID,
+			&i.HostID,
+			&i.Protocol,
+			&i.ConnectionMode,
+			&i.Status,
+			&i.StartedAt,
+			&i.ConnectedAt,
+			&i.EndedAt,
+			&i.ErrorMessage,
+			&i.BrowserIp,
+			&i.UserAgent,
+			&i.ProxySessionID,
+			&i.GuacdSessionID,
+			&i.LinuxUsername,
+			&i.ClientType,
+			&i.EventCount,
+			&i.RecordingDeletedAt,
+			&i.RecordingStatus,
+			&i.RecordingPath,
+			&i.RecordingName,
+			&i.RecordingSizeBytes,
+			&i.CreatedAt,
+			&i.UpdatedAt,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
 const listRemoteAccessSessions = `-- name: ListRemoteAccessSessions :many
 SELECT
-    ras.id, ras.user_id, ras.host_id, ras.protocol, ras.connection_mode, ras.status, ras.started_at, ras.connected_at, ras.ended_at, ras.error_message, ras.browser_ip, ras.user_agent, ras.proxy_session_id, ras.guacd_session_id, ras.recording_status, ras.recording_path, ras.recording_name, ras.recording_size_bytes, ras.created_at, ras.updated_at,
+    ras.id, ras.user_id, ras.host_id, ras.protocol, ras.connection_mode, ras.status, ras.started_at, ras.connected_at, ras.ended_at, ras.error_message, ras.browser_ip, ras.user_agent, ras.proxy_session_id, ras.guacd_session_id, ras.linux_username, ras.client_type, ras.event_count, ras.recording_deleted_at, ras.recording_status, ras.recording_path, ras.recording_name, ras.recording_size_bytes, ras.created_at, ras.updated_at,
     u.username AS user_username,
     h.friendly_name AS host_friendly_name,
     h.hostname AS host_hostname
@@ -226,6 +342,8 @@ WHERE ($1::text = '' OR ras.protocol = $1::text)
       OR u.username ILIKE '%' || $5::text || '%'
       OR h.friendly_name ILIKE '%' || $5::text || '%'
       OR COALESCE(h.hostname, '') ILIKE '%' || $5::text || '%'
+      OR COALESCE(ras.linux_username, '') ILIKE '%' || $5::text || '%'
+      OR COALESCE(ras.client_type, '') ILIKE '%' || $5::text || '%'
       OR ras.connection_mode ILIKE '%' || $5::text || '%'
   )
 ORDER BY ras.started_at DESC
@@ -258,6 +376,10 @@ type ListRemoteAccessSessionsRow struct {
 	UserAgent          *string          `json:"user_agent"`
 	ProxySessionID     *string          `json:"proxy_session_id"`
 	GuacdSessionID     *string          `json:"guacd_session_id"`
+	LinuxUsername      *string          `json:"linux_username"`
+	ClientType         *string          `json:"client_type"`
+	EventCount         int64            `json:"event_count"`
+	RecordingDeletedAt pgtype.Timestamp `json:"recording_deleted_at"`
 	RecordingStatus    string           `json:"recording_status"`
 	RecordingPath      *string          `json:"recording_path"`
 	RecordingName      *string          `json:"recording_name"`
@@ -301,6 +423,10 @@ func (q *Queries) ListRemoteAccessSessions(ctx context.Context, arg ListRemoteAc
 			&i.UserAgent,
 			&i.ProxySessionID,
 			&i.GuacdSessionID,
+			&i.LinuxUsername,
+			&i.ClientType,
+			&i.EventCount,
+			&i.RecordingDeletedAt,
 			&i.RecordingStatus,
 			&i.RecordingPath,
 			&i.RecordingName,
@@ -319,6 +445,20 @@ func (q *Queries) ListRemoteAccessSessions(ctx context.Context, arg ListRemoteAc
 		return nil, err
 	}
 	return items, nil
+}
+
+const markRemoteAccessRecordingDeleted = `-- name: MarkRemoteAccessRecordingDeleted :exec
+UPDATE remote_access_sessions
+SET
+    recording_deleted_at = CURRENT_TIMESTAMP,
+    recording_size_bytes = 0,
+    updated_at = CURRENT_TIMESTAMP
+WHERE id = $1::text
+`
+
+func (q *Queries) MarkRemoteAccessRecordingDeleted(ctx context.Context, id string) error {
+	_, err := q.db.Exec(ctx, markRemoteAccessRecordingDeleted, id)
+	return err
 }
 
 const markRemoteAccessSessionConnected = `-- name: MarkRemoteAccessSessionConnected :exec
@@ -402,8 +542,9 @@ SET
     recording_path = $2::text,
     recording_name = $3::text,
     recording_size_bytes = $4::bigint,
+    event_count = COALESCE($5::bigint, event_count),
     updated_at = CURRENT_TIMESTAMP
-WHERE id = $5::text
+WHERE id = $6::text
 `
 
 type SetRemoteAccessSessionRecordingParams struct {
@@ -411,6 +552,7 @@ type SetRemoteAccessSessionRecordingParams struct {
 	RecordingPath      *string `json:"recording_path"`
 	RecordingName      *string `json:"recording_name"`
 	RecordingSizeBytes *int64  `json:"recording_size_bytes"`
+	EventCount         *int64  `json:"event_count"`
 	ID                 string  `json:"id"`
 }
 
@@ -420,6 +562,7 @@ func (q *Queries) SetRemoteAccessSessionRecording(ctx context.Context, arg SetRe
 		arg.RecordingPath,
 		arg.RecordingName,
 		arg.RecordingSizeBytes,
+		arg.EventCount,
 		arg.ID,
 	)
 	return err

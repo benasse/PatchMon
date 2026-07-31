@@ -2,6 +2,7 @@ package store
 
 import (
 	"context"
+	"errors"
 	"strings"
 	"time"
 
@@ -23,6 +24,9 @@ const (
 	RemoteAccessStatusAgentDisconnected = "agent_disconnected"
 
 	RecordingStatusNotRequested = "not_requested"
+	RecordingStatusAvailable    = "available"
+	RecordingStatusUnavailable  = "unavailable"
+	RecordingStatusDeleted      = "deleted"
 )
 
 // RemoteAccessSessionsStore manages audited SSH/RDP remote access sessions.
@@ -55,6 +59,10 @@ type RemoteAccessSession struct {
 	UserAgent          *string    `json:"user_agent,omitempty"`
 	ProxySessionID     *string    `json:"proxy_session_id,omitempty"`
 	GuacdSessionID     *string    `json:"guacd_session_id,omitempty"`
+	LinuxUsername      *string    `json:"linux_username,omitempty"`
+	ClientType         *string    `json:"client_type,omitempty"`
+	EventCount         int64      `json:"event_count"`
+	RecordingDeletedAt *time.Time `json:"recording_deleted_at,omitempty"`
 	RecordingStatus    string     `json:"recording_status"`
 	RecordingPath      *string    `json:"recording_path,omitempty"`
 	RecordingName      *string    `json:"recording_name,omitempty"`
@@ -74,6 +82,8 @@ type CreateRemoteAccessSessionParams struct {
 	UserAgent       *string
 	ProxySessionID  *string
 	GuacdSessionID  *string
+	LinuxUsername   *string
+	ClientType      *string
 	RecordingStatus string
 	RecordingPath   *string
 	RecordingName   *string
@@ -108,6 +118,8 @@ func (s *RemoteAccessSessionsStore) Create(ctx context.Context, p CreateRemoteAc
 		UserAgent:       p.UserAgent,
 		ProxySessionID:  p.ProxySessionID,
 		GuacdSessionID:  p.GuacdSessionID,
+		LinuxUsername:   p.LinuxUsername,
+		ClientType:      p.ClientType,
 		RecordingStatus: p.RecordingStatus,
 		RecordingPath:   p.RecordingPath,
 		RecordingName:   p.RecordingName,
@@ -219,6 +231,11 @@ func (s *RemoteAccessSessionsStore) SetGuacdID(ctx context.Context, id, guacdSes
 
 // SetRecording updates recording metadata for a remote access session.
 func (s *RemoteAccessSessionsStore) SetRecording(ctx context.Context, id, status string, path, name *string, sizeBytes *int64) error {
+	return s.SetRecordingWithEventCount(ctx, id, status, path, name, sizeBytes, nil)
+}
+
+// SetRecordingWithEventCount updates recording metadata and optional event count.
+func (s *RemoteAccessSessionsStore) SetRecordingWithEventCount(ctx context.Context, id, status string, path, name *string, sizeBytes *int64, eventCount *int64) error {
 	if id == "" {
 		return nil
 	}
@@ -228,7 +245,32 @@ func (s *RemoteAccessSessionsStore) SetRecording(ctx context.Context, id, status
 		RecordingPath:      path,
 		RecordingName:      name,
 		RecordingSizeBytes: sizeBytes,
+		EventCount:         eventCount,
 	})
+}
+
+// MarkRecordingDeleted marks encrypted recording artifacts as deleted.
+func (s *RemoteAccessSessionsStore) MarkRecordingDeleted(ctx context.Context, id string) error {
+	if id == "" {
+		return nil
+	}
+	return s.db.DB(ctx).Queries.MarkRemoteAccessRecordingDeleted(ctx, id)
+}
+
+// ActiveCounts returns active pty_agent/agent_tunnel session counts for limits.
+func (s *RemoteAccessSessionsStore) ActiveCounts(ctx context.Context, userID, hostID string) (int64, int64, error) {
+	if userID == "" || hostID == "" {
+		return 0, 0, errors.New("user and host are required")
+	}
+	userCount, err := s.db.DB(ctx).Queries.CountActiveRemoteAccessSessionsForUser(ctx, userID)
+	if err != nil {
+		return 0, 0, err
+	}
+	hostCount, err := s.db.DB(ctx).Queries.CountActiveRemoteAccessSessionsForHost(ctx, hostID)
+	if err != nil {
+		return 0, 0, err
+	}
+	return userCount, hostCount, nil
 }
 
 func remoteAccessSessionFromDB(r db.RemoteAccessSession) *RemoteAccessSession {
@@ -247,6 +289,10 @@ func remoteAccessSessionFromDB(r db.RemoteAccessSession) *RemoteAccessSession {
 		UserAgent:          r.UserAgent,
 		ProxySessionID:     r.ProxySessionID,
 		GuacdSessionID:     r.GuacdSessionID,
+		LinuxUsername:      r.LinuxUsername,
+		ClientType:         r.ClientType,
+		EventCount:         r.EventCount,
+		RecordingDeletedAt: pgTimePtr(r.RecordingDeletedAt),
 		RecordingStatus:    r.RecordingStatus,
 		RecordingPath:      r.RecordingPath,
 		RecordingName:      r.RecordingName,
@@ -276,6 +322,10 @@ func remoteAccessSessionFromGetRow(r db.GetRemoteAccessSessionRow) RemoteAccessS
 		RecordingPath:      r.RecordingPath,
 		RecordingName:      r.RecordingName,
 		RecordingSizeBytes: r.RecordingSizeBytes,
+		LinuxUsername:      r.LinuxUsername,
+		ClientType:         r.ClientType,
+		EventCount:         r.EventCount,
+		RecordingDeletedAt: r.RecordingDeletedAt,
 		CreatedAt:          r.CreatedAt,
 		UpdatedAt:          r.UpdatedAt,
 	})
@@ -306,6 +356,10 @@ func remoteAccessSessionFromListRow(r db.ListRemoteAccessSessionsRow) RemoteAcce
 		RecordingPath:      r.RecordingPath,
 		RecordingName:      r.RecordingName,
 		RecordingSizeBytes: r.RecordingSizeBytes,
+		LinuxUsername:      r.LinuxUsername,
+		ClientType:         r.ClientType,
+		EventCount:         r.EventCount,
+		RecordingDeletedAt: r.RecordingDeletedAt,
 		CreatedAt:          r.CreatedAt,
 		UpdatedAt:          r.UpdatedAt,
 	})
