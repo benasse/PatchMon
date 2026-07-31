@@ -1,6 +1,7 @@
 package handler
 
 import (
+	"context"
 	"crypto/rand"
 	"encoding/hex"
 	"encoding/json"
@@ -15,6 +16,7 @@ import (
 	"sync"
 
 	"github.com/PatchMon/PatchMon/server-source-code/internal/agentregistry"
+	"github.com/PatchMon/PatchMon/server-source-code/internal/clientip"
 	"github.com/PatchMon/PatchMon/server-source-code/internal/models"
 	"github.com/PatchMon/PatchMon/server-source-code/internal/sshproxy"
 	"github.com/PatchMon/PatchMon/server-source-code/internal/store"
@@ -51,6 +53,7 @@ type SshTerminalWSHandler struct {
 	permissions *store.PermissionsStore
 	registry    *agentregistry.Registry
 	proxySess   *sshproxy.Sessions
+	remote      *store.RemoteAccessSessionsStore
 	upgrader    websocket.Upgrader
 	log         *slog.Logger
 }
@@ -63,6 +66,7 @@ func NewSshTerminalWSHandler(
 	permissions *store.PermissionsStore,
 	registry *agentregistry.Registry,
 	proxySess *sshproxy.Sessions,
+	remote *store.RemoteAccessSessionsStore,
 	log *slog.Logger,
 ) *SshTerminalWSHandler {
 	return &SshTerminalWSHandler{
@@ -72,6 +76,7 @@ func NewSshTerminalWSHandler(
 		permissions: permissions,
 		registry:    registry,
 		proxySess:   proxySess,
+		remote:      remote,
 		log:         log,
 		upgrader: websocket.Upgrader{
 			ReadBufferSize:  1024,
@@ -113,7 +118,7 @@ func (h *SshTerminalWSHandler) ServeWS(w http.ResponseWriter, r *http.Request) {
 
 	host, err := h.hosts.GetByID(r.Context(), hostID)
 	if err != nil || host == nil {
-		h.log.Info("ssh-terminal host not found", "host_id", hostID)
+		h.log.Info("ssh-terminal host not found", "host_id", hostID, "error", err)
 		h.rejectUpgrade(w, r, 404, "Host not found")
 		return
 	}
@@ -135,21 +140,23 @@ func (h *SshTerminalWSHandler) ServeWS(w http.ResponseWriter, r *http.Request) {
 	}
 
 	h.log.Info("ssh-terminal connected", "user", user.Username, "host", host.FriendlyName, "host_id", hostID)
-	h.handleConnection(conn, host, user)
+	h.handleConnection(r.Context(), conn, host, user, clientip.FromRequest(r), r.UserAgent())
 }
 
 func (h *SshTerminalWSHandler) rejectUpgrade(w http.ResponseWriter, r *http.Request, code int, msg string) {
 	http.Error(w, msg, code)
 }
 
-func (h *SshTerminalWSHandler) handleConnection(conn *websocket.Conn, host *models.Host, user *models.User) {
+func (h *SshTerminalWSHandler) handleConnection(ctx context.Context, conn *websocket.Conn, host *models.Host, user *models.User, browserIP string, userAgent string) {
 	defer func() { _ = conn.Close() }()
 
 	var sshClient *ssh.Client
 	var sshSession *ssh.Session
 	var sshStdin io.WriteCloser
 	var proxySessionID string
+	var remoteAccessSessionID string
 	var mu sync.Mutex
+	auditCtx := context.WithoutCancel(ctx)
 
 	send := func(msg interface{}) {
 		mu.Lock()
@@ -180,6 +187,10 @@ func (h *SshTerminalWSHandler) handleConnection(conn *websocket.Conn, host *mode
 		if sshClient != nil {
 			_ = sshClient.Close()
 			sshClient = nil
+		}
+		if remoteAccessSessionID != "" {
+			h.markRemoteAccessEnded(auditCtx, remoteAccessSessionID, store.RemoteAccessStatusClosed, nil)
+			remoteAccessSessionID = ""
 		}
 		sshStdin = nil
 	}
@@ -227,13 +238,19 @@ func (h *SshTerminalWSHandler) handleConnection(conn *websocket.Conn, host *mode
 			if connectionMode == "" {
 				connectionMode = "direct"
 			}
+			sessionID := h.createRemoteAccessSession(auditCtx, host, user, connectionMode, browserIP, userAgent)
+			mu.Lock()
+			remoteAccessSessionID = sessionID
+			mu.Unlock()
 
 			if connectionMode == "proxy" {
 				if !h.registry.Get(host.ApiID).Connected {
+					h.markRemoteAccessEnded(auditCtx, sessionID, store.RemoteAccessStatusFailed, strPtr("Agent not connected"))
 					send(map[string]string{"type": "error", "message": "Agent not connected. Please ensure the agent is running and connected."})
 					continue
 				}
 				if !h.registry.IsConnected(host.ApiID) {
+					h.markRemoteAccessEnded(auditCtx, sessionID, store.RemoteAccessStatusFailed, strPtr("Agent WebSocket connection lost"))
 					send(map[string]string{"type": "error", "message": "Agent WebSocket connection lost"})
 					continue
 				}
@@ -247,10 +264,12 @@ func (h *SshTerminalWSHandler) handleConnection(conn *websocket.Conn, host *mode
 					proxyPort = 22
 				}
 				if err := validateProxyHost(proxyHost); err != nil {
+					h.markRemoteAccessEnded(auditCtx, sessionID, store.RemoteAccessStatusFailed, strPtr("Invalid proxy host format"))
 					send(map[string]string{"type": "error", "message": "Invalid proxy host format"})
 					continue
 				}
 				if proxyPort < 1 || proxyPort > 65535 {
+					h.markRemoteAccessEnded(auditCtx, sessionID, store.RemoteAccessStatusFailed, strPtr("Invalid proxy port"))
 					send(map[string]string{"type": "error", "message": "Invalid proxy port (must be 1-65535)"})
 					continue
 				}
@@ -261,10 +280,13 @@ func (h *SshTerminalWSHandler) handleConnection(conn *websocket.Conn, host *mode
 				proxySessionID = hex.EncodeToString(b)
 				mu.Unlock()
 				h.proxySess.Set(proxySessionID, &sshproxy.Session{
-					FrontendWS: conn,
-					HostID:     host.ID,
-					ApiID:      host.ApiID,
+					FrontendWS:            conn,
+					Context:               auditCtx,
+					HostID:                host.ID,
+					ApiID:                 host.ApiID,
+					RemoteAccessSessionID: sessionID,
 				})
+				h.setRemoteAccessProxyID(auditCtx, sessionID, proxySessionID)
 
 				req := map[string]interface{}{
 					"type":       "ssh_proxy",
@@ -288,6 +310,7 @@ func (h *SshTerminalWSHandler) handleConnection(conn *websocket.Conn, host *mode
 				if err := h.registry.SendJSON(host.ApiID, req); err != nil {
 					h.proxySess.Delete(proxySessionID)
 					proxySessionID = ""
+					h.markRemoteAccessEnded(auditCtx, sessionID, store.RemoteAccessStatusFailed, strPtr("Failed to send proxy request to agent"))
 					send(map[string]string{"type": "error", "message": "Failed to send proxy request to agent"})
 				}
 				continue
@@ -307,6 +330,7 @@ func (h *SshTerminalWSHandler) handleConnection(conn *websocket.Conn, host *mode
 					signer, err = ssh.ParsePrivateKeyWithPassphrase([]byte(msg.PrivateKey), []byte(msg.Passphrase))
 				}
 				if err != nil {
+					h.markRemoteAccessEnded(auditCtx, sessionID, store.RemoteAccessStatusFailed, strPtr("Failed to parse private key: "+err.Error()))
 					send(map[string]string{"type": "error", "message": "Failed to parse private key: " + err.Error()})
 					continue
 				}
@@ -314,12 +338,14 @@ func (h *SshTerminalWSHandler) handleConnection(conn *websocket.Conn, host *mode
 			} else if msg.Password != "" {
 				config.Auth = []ssh.AuthMethod{ssh.Password(msg.Password)}
 			} else {
+				h.markRemoteAccessEnded(auditCtx, sessionID, store.RemoteAccessStatusFailed, strPtr("No authentication method provided"))
 				send(map[string]string{"type": "error", "message": "No authentication method provided (password or private key required)"})
 				continue
 			}
 
 			client, err := ssh.Dial("tcp", sshAddr, config)
 			if err != nil {
+				h.markRemoteAccessEnded(auditCtx, sessionID, store.RemoteAccessStatusFailed, strPtr(err.Error()))
 				send(map[string]string{"type": "error", "message": err.Error()})
 				continue
 			}
@@ -333,6 +359,7 @@ func (h *SshTerminalWSHandler) handleConnection(conn *websocket.Conn, host *mode
 				mu.Lock()
 				sshClient = nil
 				mu.Unlock()
+				h.markRemoteAccessEnded(auditCtx, sessionID, store.RemoteAccessStatusFailed, strPtr(err.Error()))
 				send(map[string]string{"type": "error", "message": err.Error()})
 				continue
 			}
@@ -355,6 +382,7 @@ func (h *SshTerminalWSHandler) handleConnection(conn *websocket.Conn, host *mode
 				sshSession = nil
 				sshClient = nil
 				mu.Unlock()
+				h.markRemoteAccessEnded(auditCtx, sessionID, store.RemoteAccessStatusFailed, strPtr(err.Error()))
 				send(map[string]string{"type": "error", "message": err.Error()})
 				continue
 			}
@@ -367,6 +395,7 @@ func (h *SshTerminalWSHandler) handleConnection(conn *websocket.Conn, host *mode
 				sshSession = nil
 				sshClient = nil
 				mu.Unlock()
+				h.markRemoteAccessEnded(auditCtx, sessionID, store.RemoteAccessStatusFailed, strPtr(err.Error()))
 				send(map[string]string{"type": "error", "message": err.Error()})
 				continue
 			}
@@ -383,6 +412,7 @@ func (h *SshTerminalWSHandler) handleConnection(conn *websocket.Conn, host *mode
 				sshClient = nil
 				sshStdin = nil
 				mu.Unlock()
+				h.markRemoteAccessEnded(auditCtx, sessionID, store.RemoteAccessStatusFailed, strPtr(err.Error()))
 				send(map[string]string{"type": "error", "message": err.Error()})
 				continue
 			}
@@ -407,10 +437,12 @@ func (h *SshTerminalWSHandler) handleConnection(conn *websocket.Conn, host *mode
 				sshClient = nil
 				sshStdin = nil
 				mu.Unlock()
+				h.markRemoteAccessEnded(auditCtx, sessionID, store.RemoteAccessStatusFailed, strPtr(err.Error()))
 				send(map[string]string{"type": "error", "message": err.Error()})
 				continue
 			}
 
+			h.markRemoteAccessConnected(auditCtx, sessionID)
 			send(map[string]string{"type": "connected"})
 
 			go func() {
@@ -509,12 +541,78 @@ func (h *SshTerminalWSHandler) HandleAgentMessage(apiID string, raw []byte) {
 	case "ssh_proxy_data":
 		_ = ws.WriteJSON(map[string]interface{}{"type": "data", "data": msg.Data})
 	case "ssh_proxy_connected":
+		h.markRemoteAccessConnected(sess.Context, sess.RemoteAccessSessionID)
 		_ = ws.WriteJSON(map[string]string{"type": "connected"})
 	case "ssh_proxy_error":
+		h.markRemoteAccessEnded(sess.Context, sess.RemoteAccessSessionID, store.RemoteAccessStatusFailed, strPtr(msg.Message))
 		_ = ws.WriteJSON(map[string]interface{}{"type": "error", "message": msg.Message})
 	case "ssh_proxy_closed":
+		h.markRemoteAccessEnded(sess.Context, sess.RemoteAccessSessionID, store.RemoteAccessStatusClosed, nil)
 		_ = ws.WriteJSON(map[string]string{"type": "closed"})
 		h.proxySess.Delete(msg.Session)
+	}
+}
+
+func (h *SshTerminalWSHandler) createRemoteAccessSession(ctx context.Context, host *models.Host, user *models.User, mode, browserIP, userAgent string) string {
+	if h.remote == nil || host == nil || user == nil {
+		return ""
+	}
+	var ipPtr *string
+	if browserIP != "" {
+		ipPtr = &browserIP
+	}
+	var uaPtr *string
+	if userAgent != "" {
+		uaPtr = &userAgent
+	}
+	session, err := h.remote.Create(ctx, store.CreateRemoteAccessSessionParams{
+		UserID:          user.ID,
+		HostID:          host.ID,
+		Protocol:        store.RemoteAccessProtocolSSH,
+		ConnectionMode:  mode,
+		BrowserIP:       ipPtr,
+		UserAgent:       uaPtr,
+		RecordingStatus: store.RecordingStatusNotRequested,
+	})
+	if err != nil {
+		if h.log != nil {
+			h.log.Warn("ssh remote access audit create failed", "host_id", host.ID, "user_id", user.ID, "error", err)
+		}
+		return ""
+	}
+	return session.ID
+}
+
+func (h *SshTerminalWSHandler) markRemoteAccessConnected(ctx context.Context, id string) {
+	if h.remote == nil || id == "" {
+		return
+	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	if err := h.remote.MarkConnected(ctx, id); err != nil && h.log != nil {
+		h.log.Warn("ssh remote access audit connected update failed", "session_id", id, "error", err)
+	}
+}
+
+func (h *SshTerminalWSHandler) markRemoteAccessEnded(ctx context.Context, id, status string, msg *string) {
+	if h.remote == nil || id == "" {
+		return
+	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	if err := h.remote.MarkEnded(ctx, id, status, msg); err != nil && h.log != nil {
+		h.log.Warn("ssh remote access audit end update failed", "session_id", id, "status", status, "error", err)
+	}
+}
+
+func (h *SshTerminalWSHandler) setRemoteAccessProxyID(ctx context.Context, id, proxyID string) {
+	if h.remote == nil || id == "" || proxyID == "" {
+		return
+	}
+	if err := h.remote.SetProxyID(ctx, id, proxyID); err != nil && h.log != nil {
+		h.log.Warn("ssh remote access audit proxy update failed", "session_id", id, "proxy_session_id", proxyID, "error", err)
 	}
 }
 

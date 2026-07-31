@@ -809,6 +809,37 @@ CREATE TABLE IF NOT EXISTS scheduled_report_runs (
     created_at TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP
 );
 
+-- remote_access_sessions
+CREATE TABLE IF NOT EXISTS remote_access_sessions (
+    id TEXT PRIMARY KEY DEFAULT gen_random_uuid()::TEXT,
+    user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    host_id TEXT NOT NULL REFERENCES hosts(id) ON DELETE CASCADE,
+    protocol TEXT NOT NULL CHECK (protocol IN ('ssh', 'rdp')),
+    connection_mode TEXT NOT NULL,
+    status TEXT NOT NULL CHECK (status IN (
+        'connecting',
+        'connected',
+        'failed',
+        'closed',
+        'timeout',
+        'agent_disconnected'
+    )),
+    started_at TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    connected_at TIMESTAMP(3),
+    ended_at TIMESTAMP(3),
+    error_message TEXT,
+    browser_ip TEXT,
+    user_agent TEXT,
+    proxy_session_id TEXT,
+    guacd_session_id TEXT,
+    recording_status TEXT NOT NULL DEFAULT 'not_requested',
+    recording_path TEXT,
+    recording_name TEXT,
+    recording_size_bytes BIGINT,
+    created_at TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+
 -- mv_package_stats — materialised view of per-package install / update /
 -- security counters. Refreshed CONCURRENTLY by the asynq scheduler every
 -- couple of minutes (see TypePackageStatsRefresh). Declared here so sqlc

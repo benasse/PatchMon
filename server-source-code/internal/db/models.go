@@ -498,6 +498,29 @@ type ReleaseNotesAcceptance struct {
 	AcceptedAt pgtype.Timestamp `json:"accepted_at"`
 }
 
+type RemoteAccessSession struct {
+	ID                 string           `json:"id"`
+	UserID             string           `json:"user_id"`
+	HostID             string           `json:"host_id"`
+	Protocol           string           `json:"protocol"`
+	ConnectionMode     string           `json:"connection_mode"`
+	Status             string           `json:"status"`
+	StartedAt          pgtype.Timestamp `json:"started_at"`
+	ConnectedAt        pgtype.Timestamp `json:"connected_at"`
+	EndedAt            pgtype.Timestamp `json:"ended_at"`
+	ErrorMessage       *string          `json:"error_message"`
+	BrowserIp          *string          `json:"browser_ip"`
+	UserAgent          *string          `json:"user_agent"`
+	ProxySessionID     *string          `json:"proxy_session_id"`
+	GuacdSessionID     *string          `json:"guacd_session_id"`
+	RecordingStatus    string           `json:"recording_status"`
+	RecordingPath      *string          `json:"recording_path"`
+	RecordingName      *string          `json:"recording_name"`
+	RecordingSizeBytes *int64           `json:"recording_size_bytes"`
+	CreatedAt          pgtype.Timestamp `json:"created_at"`
+	UpdatedAt          pgtype.Timestamp `json:"updated_at"`
+}
+
 type Repository struct {
 	ID           string           `json:"id"`
 	Name         string           `json:"name"`

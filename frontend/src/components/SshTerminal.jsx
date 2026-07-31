@@ -1,6 +1,8 @@
 import { FitAddon } from "@xterm/addon-fit";
 import { Terminal } from "@xterm/xterm";
+import Guacamole from "guacamole-common-js";
 import { useCallback, useEffect, useRef, useState } from "react";
+import { useLocation } from "react-router-dom";
 import "@xterm/xterm/css/xterm.css";
 import { useQuery } from "@tanstack/react-query";
 import {
@@ -30,12 +32,18 @@ function sanitizeForLog(value) {
 }
 
 const SshTerminal = ({ host, isOpen, onClose, embedded = false }) => {
+	const location = useLocation();
 	const { setSidebarCollapsed, sidebarCollapsed } = useSidebar();
 	const previousSidebarStateRef = useRef(null);
 	const terminalRef = useRef(null);
 	const terminalInstanceRef = useRef(null);
 	const fitAddonRef = useRef(null);
 	const wsRef = useRef(null);
+	const guacClientRef = useRef(null);
+	const guacTunnelRef = useRef(null);
+	const guacKeyboardRef = useRef(null);
+	const guacPasteHandlerRef = useRef(null);
+	const guacResizeObserverRef = useRef(null);
 	const reconnectTimeoutRef = useRef(null);
 	const idleTimeoutRef = useRef(null);
 	const idleWarningTimeoutRef = useRef(null);
@@ -76,7 +84,7 @@ const SshTerminal = ({ host, isOpen, onClose, embedded = false }) => {
 		passphrase: "",
 		port: 22,
 		authMethod: "password", // "password" or "key"
-		connectionMode: "direct", // "direct" or "proxy"
+		connectionMode: "guacd", // "guacd", "direct", or "proxy"
 		proxyHost: "localhost",
 		proxyPort: 22,
 	});
@@ -136,6 +144,18 @@ const SshTerminal = ({ host, isOpen, onClose, embedded = false }) => {
 	});
 
 	const aiEnabled = aiStatus?.ai_enabled && aiStatus?.ai_api_key_set;
+
+	const scaleGuacdDisplay = useCallback(() => {
+		const client = guacClientRef.current;
+		const container = terminalRef.current;
+		if (!client || !container) return;
+		const display = client.getDisplay();
+		const width = display.getWidth();
+		const height = display.getHeight();
+		if (!width || !height) return;
+		const scale = Math.min(container.clientWidth / width, 1);
+		display.scale(scale > 0 ? scale : 1);
+	}, []);
 
 	// Get recent terminal output for AI context
 	const getTerminalContext = useCallback(() => {
@@ -289,7 +309,8 @@ const SshTerminal = ({ host, isOpen, onClose, embedded = false }) => {
 		if (
 			(!embedded && !isOpen) ||
 			!terminalRef.current ||
-			(!isConnected && !isConnecting)
+			(!isConnected && !isConnecting) ||
+			sshConfig.connectionMode === "guacd"
 		)
 			return;
 
@@ -360,7 +381,7 @@ const SshTerminal = ({ host, isOpen, onClose, embedded = false }) => {
 			window.removeEventListener("resize", handleResize);
 			term.dispose();
 		};
-	}, [isOpen, isConnected, embedded, isConnecting]);
+	}, [isOpen, isConnected, embedded, isConnecting, sshConfig.connectionMode]);
 
 	// Resize terminal when AI panel opens/closes
 	useEffect(() => {
@@ -387,6 +408,11 @@ const SshTerminal = ({ host, isOpen, onClose, embedded = false }) => {
 	// Connect to SSH via WebSocket
 	const connectSsh = async () => {
 		if (!host) return;
+
+		if (sshConfig.connectionMode === "guacd") {
+			await connectSshGuacd();
+			return;
+		}
 
 		// Close existing WebSocket connection if any
 		if (wsRef.current) {
@@ -665,6 +691,210 @@ const SshTerminal = ({ host, isOpen, onClose, embedded = false }) => {
 		}
 	};
 
+	const cleanupGuacd = useCallback(() => {
+		if (guacPasteHandlerRef.current && terminalRef.current) {
+			terminalRef.current.removeEventListener(
+				"paste",
+				guacPasteHandlerRef.current,
+			);
+			guacPasteHandlerRef.current = null;
+		}
+		if (guacKeyboardRef.current) {
+			guacKeyboardRef.current.onkeydown = null;
+			guacKeyboardRef.current.onkeyup = null;
+			guacKeyboardRef.current = null;
+		}
+		if (guacResizeObserverRef.current) {
+			guacResizeObserverRef.current.disconnect();
+			guacResizeObserverRef.current = null;
+		}
+		if (guacClientRef.current) {
+			guacClientRef.current.disconnect();
+			guacClientRef.current = null;
+		}
+		guacTunnelRef.current = null;
+		if (terminalRef.current) {
+			while (terminalRef.current.firstChild) {
+				terminalRef.current.removeChild(terminalRef.current.firstChild);
+			}
+		}
+	}, []);
+
+	const connectSshGuacd = async () => {
+		if (!host) return;
+
+		cleanupGuacd();
+		if (wsRef.current) {
+			wsRef.current.close();
+			wsRef.current = null;
+		}
+
+		if (sshConfig.authMethod === "password" && !sshConfig.password) {
+			setError("Password is required");
+			return;
+		}
+		if (sshConfig.authMethod === "key" && !sshConfig.privateKey) {
+			setError("Private key is required");
+			return;
+		}
+
+		setIsConnecting(true);
+		setError(null);
+
+		let ticketData;
+		try {
+			const terminalWidth = Math.max(480, terminalRef.current?.clientWidth || 1024);
+			const terminalHeight = Math.max(
+				320,
+				terminalRef.current?.clientHeight || 520,
+			);
+			const response = await fetch("/api/v1/auth/ssh-guacd-ticket", {
+				method: "POST",
+				credentials: "include",
+				headers: { "Content-Type": "application/json" },
+				body: JSON.stringify({
+					hostId: host.id,
+					username: sshConfig.username,
+					password:
+						sshConfig.authMethod === "password" ? sshConfig.password : "",
+					privateKey:
+						sshConfig.authMethod === "key" ? sshConfig.privateKey : "",
+					passphrase: sshConfig.passphrase,
+					port: sshConfig.port || 22,
+					authMethod: sshConfig.authMethod,
+					width: terminalWidth,
+					height: terminalHeight,
+				}),
+			});
+			if (!response.ok) {
+				const errorData = await response.json().catch(() => ({}));
+				throw new Error(errorData.error || "Failed to get SSH guacd ticket");
+			}
+			ticketData = await response.json();
+		} catch (err) {
+			setError(err.message || "Failed to get SSH guacd ticket");
+			setIsConnecting(false);
+			return;
+		}
+
+		const { ticket, websocketTunnelUrl } = ticketData || {};
+		if (!ticket || !websocketTunnelUrl) {
+			setError("Invalid SSH guacd ticket response");
+			setIsConnecting(false);
+			return;
+		}
+
+		try {
+			const protocol = window.location.protocol === "https:" ? "wss:" : "ws:";
+			const baseUrl = `${protocol}//${window.location.host}${websocketTunnelUrl}`;
+			const tunnel = new Guacamole.WebSocketTunnel(baseUrl);
+			guacTunnelRef.current = tunnel;
+
+			tunnel.onerror = (status) => {
+				setError(
+					status?.message || `Guacamole tunnel error (${status?.code ?? "?"})`,
+				);
+				setIsConnected(false);
+				setIsConnecting(false);
+			};
+			tunnel.onstatechange = (state) => {
+				if (state === Guacamole.Tunnel.State.CLOSED) {
+					setIsConnected(false);
+					setIsConnecting(false);
+				}
+			};
+
+			const client = new Guacamole.Client(tunnel);
+			guacClientRef.current = client;
+
+			client.onstatechange = (state) => {
+				if (state === Guacamole.Client.State.CONNECTED) {
+					setIsConnecting(false);
+					setIsConnected(true);
+					setError(null);
+					saveUsername(sshConfig.username);
+					setSshConfig((prev) => ({
+						...prev,
+						password: "",
+						privateKey: "",
+						passphrase: "",
+					}));
+					terminalRef.current?.focus();
+					resetIdleTimeout();
+					setTimeout(scaleGuacdDisplay, 50);
+				} else if (state === Guacamole.Client.State.DISCONNECTED) {
+					setIsConnected(false);
+					setIsConnecting(false);
+				}
+			};
+
+			client.onerror = (status) => {
+				setError(status?.message || `SSH error (${status?.code ?? "?"})`);
+				setIsConnected(false);
+				setIsConnecting(false);
+			};
+
+			client.onclipboard = (stream, mimetype) => {
+				if (mimetype !== "text/plain") return;
+				const reader = new Guacamole.StringReader(stream);
+				let data = "";
+				reader.ontext = (text) => {
+					data += text;
+				};
+				reader.onend = () => {
+					navigator.clipboard?.writeText(data).catch(() => {});
+				};
+			};
+
+			if (terminalRef.current) {
+				while (terminalRef.current.firstChild) {
+					terminalRef.current.removeChild(terminalRef.current.firstChild);
+				}
+				const display = client.getDisplay();
+				const element = display.getElement();
+				element.style.transformOrigin = "top left";
+				terminalRef.current.appendChild(element);
+				terminalRef.current.tabIndex = 0;
+				setTimeout(() => {
+					scaleGuacdDisplay();
+					terminalRef.current?.scrollTo({ top: 0, left: 0 });
+				}, 100);
+
+				const keyboard = new Guacamole.Keyboard(terminalRef.current);
+				keyboard.onkeydown = (keysym) => {
+					client.sendKeyEvent(1, keysym);
+					resetIdleTimeout();
+				};
+				keyboard.onkeyup = (keysym) => {
+					client.sendKeyEvent(0, keysym);
+				};
+				guacKeyboardRef.current = keyboard;
+
+				const handlePaste = (event) => {
+					const text = event.clipboardData?.getData("text/plain");
+					if (!text) return;
+					const stream = client.createClipboardStream("text/plain");
+					const writer = new Guacamole.StringWriter(stream);
+					writer.sendText(text);
+					writer.sendEnd();
+					resetIdleTimeout();
+				};
+				guacPasteHandlerRef.current = handlePaste;
+				terminalRef.current.addEventListener("paste", handlePaste);
+
+				const observer = new ResizeObserver(() => scaleGuacdDisplay());
+				observer.observe(terminalRef.current);
+				guacResizeObserverRef.current = observer;
+			}
+
+			client.connect(`ticket=${encodeURIComponent(ticket)}`);
+		} catch (err) {
+			setError(err.message || "Failed to establish SSH guacd connection");
+			setIsConnecting(false);
+			cleanupGuacd();
+		}
+	};
+
 	// Close install commands dropdown when clicking outside
 	useEffect(() => {
 		if (!showInstallCommands) return;
@@ -700,6 +930,7 @@ const SshTerminal = ({ host, isOpen, onClose, embedded = false }) => {
 			wsRef.current.close();
 			wsRef.current = null;
 		}
+		cleanupGuacd();
 		setIsConnected(false);
 		setIsConnecting(false);
 		// Clear sensitive credentials from memory
@@ -709,7 +940,7 @@ const SshTerminal = ({ host, isOpen, onClose, embedded = false }) => {
 			privateKey: "",
 			passphrase: "",
 		}));
-	}, []);
+	}, [cleanupGuacd]);
 
 	// Reset idle timeout on activity
 	const resetIdleTimeout = useCallback(() => {
@@ -751,7 +982,12 @@ const SshTerminal = ({ host, isOpen, onClose, embedded = false }) => {
 
 	// Handle terminal input with AI completion support
 	useEffect(() => {
-		if (!terminalInstanceRef.current || !isConnected) return;
+		if (
+			!terminalInstanceRef.current ||
+			!isConnected ||
+			sshConfig.connectionMode === "guacd"
+		)
+			return;
 
 		const term = terminalInstanceRef.current;
 
@@ -788,7 +1024,7 @@ const SshTerminal = ({ host, isOpen, onClose, embedded = false }) => {
 				disposable.dispose();
 			}
 		};
-	}, [isConnected, resetIdleTimeout]);
+	}, [isConnected, resetIdleTimeout, sshConfig.connectionMode]);
 
 	// Set up idle timeout when connected, reset on terminal data
 	useEffect(() => {
@@ -861,20 +1097,39 @@ const SshTerminal = ({ host, isOpen, onClose, embedded = false }) => {
 	useEffect(() => {
 		if (!isOpen && !embedded) {
 			// Only fully cleanup in modal mode when actually closed
-			if (wsRef.current) {
-				wsRef.current.close();
-				wsRef.current = null;
-			}
+			handleDisconnect();
 			if (reconnectTimeoutRef.current) {
 				clearTimeout(reconnectTimeoutRef.current);
 				reconnectTimeoutRef.current = null;
 			}
-			setIsConnected(false);
-			setIsConnecting(false);
 			setError(null);
 		}
 		// In embedded mode, we never cleanup - connection stays alive when tab is hidden
-	}, [isOpen, embedded]);
+	}, [isOpen, embedded, handleDisconnect]);
+
+	// Always close live sessions when the component is unmounted, e.g. leaving
+	// the Host page. HostDetail keeps this component mounted for tab switches,
+	// so this does not break the current "hide tab, keep terminal alive" flow.
+	useEffect(() => {
+		return () => {
+			handleDisconnect();
+			if (reconnectTimeoutRef.current) {
+				clearTimeout(reconnectTimeoutRef.current);
+				reconnectTimeoutRef.current = null;
+			}
+		};
+	}, [handleDisconnect]);
+
+	useEffect(() => {
+		if (!embedded || !host?.id) return;
+		if (location.pathname.startsWith(`/hosts/${host.id}`)) return;
+
+		handleDisconnect();
+		if (reconnectTimeoutRef.current) {
+			clearTimeout(reconnectTimeoutRef.current);
+			reconnectTimeoutRef.current = null;
+		}
+	}, [embedded, handleDisconnect, host?.id, location.pathname]);
 
 	const handleClose = () => {
 		handleDisconnect();
@@ -889,8 +1144,11 @@ const SshTerminal = ({ host, isOpen, onClose, embedded = false }) => {
 			<div
 				className="bg-secondary-900 rounded-lg w-full flex flex-col overflow-hidden"
 				style={{
-					height: isConnected || isConnecting ? "calc(100vh - 200px)" : "auto",
-					minHeight: isConnected || isConnecting ? "600px" : "auto",
+					height:
+						isConnected || isConnecting
+							? "clamp(520px, calc(100vh - 300px), 760px)"
+							: "auto",
+					minHeight: isConnected || isConnecting ? "520px" : "auto",
 				}}
 			>
 				{/* Compact Header */}
@@ -1014,6 +1272,24 @@ const SshTerminal = ({ host, isOpen, onClose, embedded = false }) => {
 
 							{/* Connection Mode Toggle */}
 							<div className="flex gap-6 mb-1">
+								<label className="flex items-center gap-2 cursor-pointer group">
+									<input
+										type="radio"
+										name="connectionMode"
+										value="guacd"
+										checked={sshConfig.connectionMode === "guacd"}
+										onChange={(e) =>
+											setSshConfig({
+												...sshConfig,
+												connectionMode: e.target.value,
+											})
+										}
+										className="text-primary-600 focus:ring-primary-500"
+									/>
+									<span className="text-xs font-medium text-secondary-300 group-hover:text-secondary-200 transition-colors">
+										Guacamole
+									</span>
+								</label>
 								<label className="flex items-center gap-2 cursor-pointer group">
 									<input
 										type="radio"
@@ -1342,10 +1618,10 @@ const SshTerminal = ({ host, isOpen, onClose, embedded = false }) => {
 							className={`flex flex-col transition-all duration-300 overflow-hidden ${aiPanelOpen ? "flex-1 min-w-0 pr-2" : "flex-1"}`}
 						>
 							{/* Terminal */}
-							<div className="flex-1 p-4 min-h-0">
+							<div className="flex-1 p-4 min-h-0 overflow-hidden">
 								<div
 									ref={terminalRef}
-									className="w-full h-full bg-black rounded"
+									className="w-full h-full overflow-hidden bg-black rounded"
 								/>
 							</div>
 							{/* AI Toggle Button */}
@@ -1562,7 +1838,7 @@ const SshTerminal = ({ host, isOpen, onClose, embedded = false }) => {
 				</div>
 
 				{/* Connection Form (shown when not connected) */}
-				{!isConnected && !isConnecting && (
+							{!isConnected && !isConnecting && (
 					<div className="p-6 border-b border-secondary-700 bg-secondary-800 flex-shrink-0">
 						<div className="max-w-2xl mx-auto space-y-4">
 							{error && (
@@ -1570,6 +1846,62 @@ const SshTerminal = ({ host, isOpen, onClose, embedded = false }) => {
 									{error}
 								</div>
 							)}
+							<div className="flex gap-6">
+								<label className="flex items-center gap-2 cursor-pointer group">
+									<input
+										type="radio"
+										name="modalConnectionMode"
+										value="guacd"
+										checked={sshConfig.connectionMode === "guacd"}
+										onChange={(e) =>
+											setSshConfig({
+												...sshConfig,
+												connectionMode: e.target.value,
+											})
+										}
+										className="text-primary-600 focus:ring-primary-500"
+									/>
+									<span className="text-sm font-medium text-secondary-300 group-hover:text-secondary-200 transition-colors">
+										Guacamole
+									</span>
+								</label>
+								<label className="flex items-center gap-2 cursor-pointer group">
+									<input
+										type="radio"
+										name="modalConnectionMode"
+										value="direct"
+										checked={sshConfig.connectionMode === "direct"}
+										onChange={(e) =>
+											setSshConfig({
+												...sshConfig,
+												connectionMode: e.target.value,
+											})
+										}
+										className="text-primary-600 focus:ring-primary-500"
+									/>
+									<span className="text-sm font-medium text-secondary-300 group-hover:text-secondary-200 transition-colors">
+										Direct
+									</span>
+								</label>
+								<label className="flex items-center gap-2 cursor-pointer group">
+									<input
+										type="radio"
+										name="modalConnectionMode"
+										value="proxy"
+										checked={sshConfig.connectionMode === "proxy"}
+										onChange={(e) =>
+											setSshConfig({
+												...sshConfig,
+												connectionMode: e.target.value,
+											})
+										}
+										className="text-primary-600 focus:ring-primary-500"
+									/>
+									<span className="text-sm font-medium text-secondary-300 group-hover:text-secondary-200 transition-colors">
+										Proxy via Agent
+									</span>
+								</label>
+							</div>
 							<div className="grid grid-cols-2 gap-4">
 								<div>
 									<label className="block text-sm font-medium text-secondary-300 mb-1">

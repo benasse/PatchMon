@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/PatchMon/PatchMon/server-source-code/internal/agentregistry"
+	"github.com/PatchMon/PatchMon/server-source-code/internal/clientip"
 	hostctx "github.com/PatchMon/PatchMon/server-source-code/internal/context"
 	"github.com/PatchMon/PatchMon/server-source-code/internal/database"
 	"github.com/PatchMon/PatchMon/server-source-code/internal/middleware"
@@ -50,6 +51,7 @@ type RDPHandler struct {
 	log            *slog.Logger
 	db             database.DBProvider
 	notify         *notifications.Emitter
+	remote         *store.RemoteAccessSessionsStore
 }
 
 // NewRDPHandler creates a new RDP handler.
@@ -66,6 +68,7 @@ func NewRDPHandler(
 	log *slog.Logger,
 	db database.DBProvider,
 	notify *notifications.Emitter,
+	remote *store.RemoteAccessSessionsStore,
 ) *RDPHandler {
 	return &RDPHandler{
 		rdpTicketStore: rdpTicketStore,
@@ -80,6 +83,7 @@ func NewRDPHandler(
 		log:            log,
 		db:             db,
 		notify:         notify,
+		remote:         remote,
 	}
 }
 
@@ -198,7 +202,10 @@ func (h *RDPHandler) ServeCreateTicket(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	remoteSessionID := h.createRemoteAccessSession(r.Context(), host, user, "agent-proxy-guacd", clientip.FromRequest(r), r.UserAgent(), nil)
+
 	if !h.registry.Get(host.ApiID).Connected {
+		h.markRemoteAccessEnded(r.Context(), remoteSessionID, store.RemoteAccessStatusFailed, strPtr("Agent disconnected"))
 		JSON(w, http.StatusServiceUnavailable, map[string]string{
 			"error": "The PatchMon agent on this host is not connected. Check that the agent service is running and has network access to the server.",
 			"code":  "agent_disconnected",
@@ -211,6 +218,7 @@ func (h *RDPHandler) ServeCreateTicket(w http.ResponseWriter, r *http.Request) {
 	// "invalid ticket" error.
 	if probe, err := net.DialTimeout("tcp", h.guacdAddress, guacdPreflightTimeout); err != nil {
 		h.log.Warn("rdp-ticket guacd preflight failed", "addr", h.guacdAddress, "error", err)
+		h.markRemoteAccessEnded(r.Context(), remoteSessionID, store.RemoteAccessStatusFailed, strPtr("guacd unavailable: "+err.Error()))
 		JSON(w, http.StatusServiceUnavailable, map[string]string{
 			"error": "guacd is not reachable on the PatchMon server. Install it (apt install guacd / yum install guacd) or set GUACD_ADDRESS to a running sidecar.",
 			"code":  "guacd_unavailable",
@@ -223,6 +231,7 @@ func (h *RDPHandler) ServeCreateTicket(w http.ResponseWriter, r *http.Request) {
 	sessionID, port, err := h.rdpSessions.Create(r.Context(), host.ApiID, host.ID)
 	if err != nil {
 		if errors.Is(err, rdpproxy.ErrMaxSessionsReached) {
+			h.markRemoteAccessEnded(r.Context(), remoteSessionID, store.RemoteAccessStatusFailed, strPtr("Too many concurrent RDP sessions"))
 			JSON(w, http.StatusServiceUnavailable, map[string]string{
 				"error": "Too many concurrent RDP sessions on this server, please try again later.",
 				"code":  "max_sessions",
@@ -230,12 +239,14 @@ func (h *RDPHandler) ServeCreateTicket(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		h.log.Error("rdp proxy session create failed", "host_id", host.ID, "error", err)
+		h.markRemoteAccessEnded(r.Context(), remoteSessionID, store.RemoteAccessStatusFailed, strPtr("Failed to create RDP proxy session: "+err.Error()))
 		JSON(w, http.StatusInternalServerError, map[string]string{
 			"error": "Failed to create RDP proxy session.",
 			"code":  "server_error",
 		})
 		return
 	}
+	h.setRemoteAccessProxyID(r.Context(), remoteSessionID, sessionID)
 
 	// Send rdp_proxy to agent via the registry's per-agent write mutex.
 	if err := h.rdpSessions.SendToAgent(sessionID, map[string]interface{}{
@@ -246,6 +257,7 @@ func (h *RDPHandler) ServeCreateTicket(w http.ResponseWriter, r *http.Request) {
 	}); err != nil {
 		h.rdpSessions.Delete(sessionID)
 		h.log.Error("rdp_proxy send failed", "host_id", host.ID, "error", err)
+		h.markRemoteAccessEnded(r.Context(), remoteSessionID, store.RemoteAccessStatusFailed, strPtr("Failed to start RDP proxy on the agent: "+err.Error()))
 		JSON(w, http.StatusInternalServerError, map[string]string{
 			"error": "Failed to start RDP proxy on the agent.",
 			"code":  "agent_send_failed",
@@ -264,10 +276,12 @@ func (h *RDPHandler) ServeCreateTicket(w http.ResponseWriter, r *http.Request) {
 		h.rdpSessions.SendDisconnect(sessionID)
 		h.rdpSessions.Delete(sessionID)
 		if errors.Is(waitErr, context.Canceled) || errors.Is(waitErr, context.DeadlineExceeded) {
+			h.markRemoteAccessEnded(r.Context(), remoteSessionID, store.RemoteAccessStatusClosed, strPtr("Client disconnected before RDP proxy was ready"))
 			// Client disconnected mid-request; no useful response to send.
 			return
 		}
 		if errors.Is(waitErr, rdpproxy.ErrAgentTimeout) {
+			h.markRemoteAccessEnded(r.Context(), remoteSessionID, store.RemoteAccessStatusTimeout, strPtr("Agent did not respond to the RDP proxy request in time"))
 			JSON(w, http.StatusGatewayTimeout, map[string]string{
 				"error": "The PatchMon agent did not respond to the RDP proxy request in time. Check that the agent is healthy and try again.",
 				"code":  "agent_timeout",
@@ -275,6 +289,7 @@ func (h *RDPHandler) ServeCreateTicket(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		h.log.Warn("rdp-ticket wait error", "host_id", host.ID, "error", waitErr)
+		h.markRemoteAccessEnded(r.Context(), remoteSessionID, store.RemoteAccessStatusFailed, strPtr("Unexpected error while waiting for the agent: "+waitErr.Error()))
 		JSON(w, http.StatusInternalServerError, map[string]string{
 			"error": "Unexpected error while waiting for the agent.",
 			"code":  "server_error",
@@ -291,6 +306,7 @@ func (h *RDPHandler) ServeCreateTicket(w http.ResponseWriter, r *http.Request) {
 		if msg == "" {
 			msg = "The agent rejected the RDP proxy request without providing a reason."
 		}
+		h.markRemoteAccessEnded(r.Context(), remoteSessionID, store.RemoteAccessStatusFailed, strPtr(msg))
 		JSON(w, http.StatusBadGateway, map[string]string{
 			"error": msg,
 			"code":  classifyAgentError(msg),
@@ -298,12 +314,13 @@ func (h *RDPHandler) ServeCreateTicket(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	ticket, err := h.rdpTicketStore.CreateTicket(r.Context(), userID, host.ID, sessionID, port, req.Username, req.Password, reqWidth, reqHeight)
+	ticket, err := h.rdpTicketStore.CreateTicket(r.Context(), userID, host.ID, sessionID, remoteSessionID, port, req.Username, req.Password, reqWidth, reqHeight)
 	if err != nil {
 		// Agent still thinks the proxy is live — tell it to disconnect before
 		// removing the session from the map.
 		h.rdpSessions.SendDisconnect(sessionID)
 		h.rdpSessions.Delete(sessionID)
+		h.markRemoteAccessEnded(r.Context(), remoteSessionID, store.RemoteAccessStatusFailed, strPtr("Failed to create RDP ticket: "+err.Error()))
 		JSON(w, http.StatusInternalServerError, map[string]string{
 			"error": "Failed to create RDP ticket.",
 			"code":  "server_error",
@@ -409,6 +426,11 @@ func classifyAgentError(msg string) string {
 // It wraps the guac WebSocket server with origin validation to prevent cross-origin hijacking.
 func (h *RDPHandler) WebsocketTunnelHandler() http.Handler {
 	guacWSHandler := guac.NewWebsocketServer(h.doGuacConnect)
+	guacWSHandler.OnDisconnect = func(_ string, r *http.Request, tunnel guac.Tunnel) {
+		if audited, ok := tunnel.(*auditedGuacTunnel); ok {
+			h.markRemoteAccessEnded(r.Context(), audited.remoteAccessSessionID, store.RemoteAccessStatusClosed, nil)
+		}
+	}
 
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		// Validate Origin header before handing off to guac's WebSocket upgrader.
@@ -442,15 +464,18 @@ func (h *RDPHandler) doGuacConnect(r *http.Request) (guac.Tunnel, error) {
 	user, err := h.users.GetByID(r.Context(), data.UserID)
 	if err != nil || user == nil || !user.IsActive {
 		h.log.Info("rdp tunnel user revoked or inactive", "user_id", data.UserID)
+		h.markRemoteAccessEnded(r.Context(), data.RemoteAccessSessionID, store.RemoteAccessStatusFailed, strPtr("User revoked or inactive before RDP tunnel opened"))
 		return nil, ErrRDPTicketRequired
 	}
 	canUseRemoteAccess, err := h.userCanUseRemoteAccess(r.Context(), user)
 	if err != nil {
 		h.log.Warn("rdp tunnel permission lookup failed", "user_id", data.UserID, "role", user.Role, "error", err)
+		h.markRemoteAccessEnded(r.Context(), data.RemoteAccessSessionID, store.RemoteAccessStatusFailed, strPtr("Failed to verify remote access permission"))
 		return nil, ErrRDPTicketRequired
 	}
 	if !canUseRemoteAccess {
 		h.log.Info("rdp tunnel user lacks remote access permission", "user_id", data.UserID, "role", user.Role)
+		h.markRemoteAccessEnded(r.Context(), data.RemoteAccessSessionID, store.RemoteAccessStatusFailed, strPtr("User lacks remote access permission"))
 		return nil, ErrRDPTicketRequired
 	}
 
@@ -458,6 +483,7 @@ func (h *RDPHandler) doGuacConnect(r *http.Request) (guac.Tunnel, error) {
 	port, ok := h.rdpSessions.Get(data.SessionID)
 	if !ok {
 		h.log.Info("rdp tunnel session not found", "session_id", data.SessionID)
+		h.markRemoteAccessEnded(r.Context(), data.RemoteAccessSessionID, store.RemoteAccessStatusFailed, strPtr("RDP proxy session not found"))
 		return nil, ErrRDPTicketRequired
 	}
 
@@ -465,6 +491,7 @@ func (h *RDPHandler) doGuacConnect(r *http.Request) (guac.Tunnel, error) {
 	conn, err := net.Dial("tcp", h.guacdAddress)
 	if err != nil {
 		h.log.Error("rdp tunnel guacd connect failed", "addr", h.guacdAddress, "error", err)
+		h.markRemoteAccessEnded(r.Context(), data.RemoteAccessSessionID, store.RemoteAccessStatusFailed, strPtr("guacd connect failed: "+err.Error()))
 		return nil, err
 	}
 
@@ -530,8 +557,10 @@ func (h *RDPHandler) doGuacConnect(r *http.Request) (guac.Tunnel, error) {
 			"missing_username_or_password", data.Username == "" || data.Password == "",
 			"error", err,
 		)
+		h.markRemoteAccessEnded(r.Context(), data.RemoteAccessSessionID, store.RemoteAccessStatusFailed, strPtr("guacd handshake failed: "+err.Error()))
 		return nil, err
 	}
+	h.markRemoteAccessConnected(r.Context(), data.RemoteAccessSessionID)
 
 	// Audit trail: record which RDP security posture we requested for this
 	// session. guacd does not expose the negotiated mode back to PatchMon, so
@@ -547,7 +576,10 @@ func (h *RDPHandler) doGuacConnect(r *http.Request) (guac.Tunnel, error) {
 	)
 
 	// Clean up session when tunnel closes (handled by caller)
-	return guac.NewSimpleTunnel(stream), nil
+	return &auditedGuacTunnel{
+		Tunnel:                guac.NewSimpleTunnel(stream),
+		remoteAccessSessionID: data.RemoteAccessSessionID,
+	}, nil
 }
 
 // WebsocketTunnelHandlerWithQuery builds the WebSocket URL with ticket and params.
@@ -569,4 +601,73 @@ func (h *RDPHandler) BuildTunnelURL(baseURL string, ticket string, width, height
 	q.Set("height", strconv.Itoa(height))
 	u.RawQuery = q.Encode()
 	return u.String()
+}
+
+type auditedGuacTunnel struct {
+	guac.Tunnel
+	remoteAccessSessionID string
+}
+
+func (h *RDPHandler) createRemoteAccessSession(ctx context.Context, host *models.Host, user *models.User, mode, browserIP, userAgent string, proxySessionID *string) string {
+	if h.remote == nil || host == nil || user == nil {
+		return ""
+	}
+	var ipPtr *string
+	if browserIP != "" {
+		ipPtr = &browserIP
+	}
+	var uaPtr *string
+	if userAgent != "" {
+		uaPtr = &userAgent
+	}
+	session, err := h.remote.Create(ctx, store.CreateRemoteAccessSessionParams{
+		UserID:          user.ID,
+		HostID:          host.ID,
+		Protocol:        store.RemoteAccessProtocolRDP,
+		ConnectionMode:  mode,
+		BrowserIP:       ipPtr,
+		UserAgent:       uaPtr,
+		ProxySessionID:  proxySessionID,
+		RecordingStatus: store.RecordingStatusNotRequested,
+	})
+	if err != nil {
+		if h.log != nil {
+			h.log.Warn("rdp remote access audit create failed", "host_id", host.ID, "user_id", user.ID, "error", err)
+		}
+		return ""
+	}
+	return session.ID
+}
+
+func (h *RDPHandler) markRemoteAccessConnected(ctx context.Context, id string) {
+	if h.remote == nil || id == "" {
+		return
+	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	if err := h.remote.MarkConnected(context.WithoutCancel(ctx), id); err != nil && h.log != nil {
+		h.log.Warn("rdp remote access audit connected update failed", "session_id", id, "error", err)
+	}
+}
+
+func (h *RDPHandler) markRemoteAccessEnded(ctx context.Context, id, status string, msg *string) {
+	if h.remote == nil || id == "" {
+		return
+	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	if err := h.remote.MarkEnded(context.WithoutCancel(ctx), id, status, msg); err != nil && h.log != nil {
+		h.log.Warn("rdp remote access audit end update failed", "session_id", id, "status", status, "error", err)
+	}
+}
+
+func (h *RDPHandler) setRemoteAccessProxyID(ctx context.Context, id, proxyID string) {
+	if h.remote == nil || id == "" || proxyID == "" {
+		return
+	}
+	if err := h.remote.SetProxyID(context.WithoutCancel(ctx), id, proxyID); err != nil && h.log != nil {
+		h.log.Warn("rdp remote access audit proxy update failed", "session_id", id, "proxy_session_id", proxyID, "error", err)
+	}
 }

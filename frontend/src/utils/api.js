@@ -555,6 +555,23 @@ export const rdpAPI = {
 	createTicket: (data) => api.post("/auth/rdp-ticket", data),
 };
 
+// Remote Access Sessions API (SSH/RDP audit trail)
+export const remoteAccessAPI = {
+	listSessions: (params = {}) => api.get("/remote-access/sessions", { params }),
+	getSession: (id) => api.get(`/remote-access/sessions/${id}`),
+	getRecording: (id) => api.get(`/remote-access/recordings/${id}`),
+	getRecordingData: (id) =>
+		api.get(`/remote-access/recordings/${id}/data`, {
+			responseType: "arraybuffer",
+		}),
+	getRecordingTiming: (id) =>
+		api.get(`/remote-access/recordings/${id}/timing`, {
+			responseType: "text",
+		}),
+	downloadRecordingUrl: (id) =>
+		`/api/v1/remote-access/recordings/${encodeURIComponent(id)}/download`,
+};
+
 // Auth API
 export const authAPI = {
 	login: (username, password) =>

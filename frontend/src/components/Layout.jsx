@@ -14,6 +14,7 @@ import {
 	LayoutDashboard,
 	LogOut,
 	Menu,
+	MonitorUp,
 	Package,
 	Plus,
 	RefreshCw,
@@ -240,6 +241,22 @@ const Layout = ({ children }) => {
 					lockedModule: patchingLocked ? "patching" : null,
 					lockedTier: patchingLocked ? getRequiredTier("patching") : null,
 					children: patchingChildren,
+				});
+			}
+
+			if (hasPermission("can_use_remote_access")) {
+				opsItems.push({
+					name: "Remote Access",
+					href: "/remote-access",
+					icon: MonitorUp,
+					lockedModule:
+						!hasModule("ssh_terminal") && !hasModule("rdp")
+							? "ssh_terminal"
+							: null,
+					lockedTier:
+						!hasModule("ssh_terminal") && !hasModule("rdp")
+							? getRequiredTier("ssh_terminal")
+							: null,
 				});
 			}
 

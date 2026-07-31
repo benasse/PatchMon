@@ -203,16 +203,25 @@ func NewRouter(ctx context.Context, cfg *config.Config, db *database.DB, rdb *re
 	}
 	installHandler := handler.NewInstallHandler(hostsStore, settingsStore, bootstrapStore, reportStore)
 	sshProxySessions := sshproxy.NewSessions()
+	remoteAccessSessionsStore := store.NewRemoteAccessSessionsStore(dbProvider)
 	alertsStore := store.NewAlertsStore(dbProvider)
 	alertConfigStore := store.NewAlertConfigStore(dbProvider)
 	var sshTerminalWSHandler *handler.SshTerminalWSHandler
 	var rdpHandler *handler.RDPHandler
+	var sshGuacdHandler *handler.SSHGuacdHandler
 	if rdb != nil && cfg.GuacdAddress != "" {
+		sshGuacdTicketStore := store.NewSSHGuacdTicketStore(redisResolver, enc)
+		sshGuacdHandler = handler.NewSSHGuacdHandler(
+			sshGuacdTicketStore, hostsStore, usersStore, permissionsStore,
+			cfg.GuacdAddress, resolved.CORSOrigin, corsOriginResolver(ctxRegistry), log, dbProvider, notifyEmit,
+			remoteAccessSessionsStore,
+		)
 		rdpTicketStore := store.NewRDPTicketStore(redisResolver, enc)
 		rdpSessions := rdpproxy.NewSessions(log, registry)
 		rdpHandler = handler.NewRDPHandler(
 			rdpTicketStore, rdpSessions, hostsStore, usersStore, permissionsStore,
 			registry, cfg.GuacdAddress, resolved.CORSOrigin, corsOriginResolver(ctxRegistry), log, dbProvider, notifyEmit,
+			remoteAccessSessionsStore,
 		)
 	}
 	// Patch run store is needed by the agent-disconnect handler (to mark
@@ -230,7 +239,7 @@ func NewRouter(ctx context.Context, cfg *config.Config, db *database.DB, rdb *re
 	if sshTicketStore != nil {
 		sshTerminalWSHandler = handler.NewSshTerminalWSHandler(
 			sshTicketStore, hostsStore, usersStore, permissionsStore,
-			registry, sshProxySessions, log,
+			registry, sshProxySessions, remoteAccessSessionsStore, log,
 		)
 		agentWsHandler = handler.NewAgentWSHandler(
 			hostsStore, registry, sshTerminalWSHandler.HandleAgentMessage,
@@ -247,6 +256,7 @@ func NewRouter(ctx context.Context, cfg *config.Config, db *database.DB, rdb *re
 	if sshTicketStore != nil {
 		sshTicketHandler = handler.NewSshTicketHandler(sshTicketStore, hostsStore, dbProvider, notifyEmit)
 	}
+	remoteAccessSessionsHandler := handler.NewRemoteAccessSessionsHandler(remoteAccessSessionsStore)
 
 	// Alerts/reporting
 	alertsHandler := handler.NewAlertsHandler(alertsStore, alertConfigStore, dbProvider)
@@ -281,10 +291,11 @@ func NewRouter(ctx context.Context, cfg *config.Config, db *database.DB, rdb *re
 	// When GUACD_ADDRESS points to a remote host (e.g. guacd:4822 in Docker), guacd runs as a sidecar.
 	var guacdProc *guacd.Process
 	rdpEnabled := rdpHandler != nil
-	if rdpEnabled && !guacd.IsRemoteAddress(cfg.GuacdAddress) {
+	guacdEnabled := rdpEnabled || sshGuacdHandler != nil
+	if guacdEnabled && !guacd.IsRemoteAddress(cfg.GuacdAddress) {
 		guacdProc = guacd.Start(ctx, cfg.GuacdPath, cfg.GuacdAddress, log)
-	} else if rdpEnabled && guacd.IsRemoteAddress(cfg.GuacdAddress) && log != nil {
-		log.Info("RDP using remote guacd", "addr", cfg.GuacdAddress)
+	} else if guacdEnabled && guacd.IsRemoteAddress(cfg.GuacdAddress) && log != nil {
+		log.Info("remote access using remote guacd", "addr", cfg.GuacdAddress)
 	}
 
 	r.Route("/api/v1", func(r chi.Router) {
@@ -332,6 +343,10 @@ func NewRouter(ctx context.Context, cfg *config.Config, db *database.DB, rdb *re
 		// Gated by the ssh_terminal module (Max tier) for multi-context deployments.
 		if sshTerminalWSHandler != nil {
 			r.With(hostctx.RequireModule("ssh_terminal")).Get("/ssh-terminal/{hostId}", sshTerminalWSHandler.ServeWS)
+		}
+		// SSH Guacamole WebSocket tunnel (ticket auth via query param).
+		if sshGuacdHandler != nil {
+			r.With(hostctx.RequireModule("ssh_terminal")).Handle("/ssh-guacd/websocket-tunnel", sshGuacdHandler.WebsocketTunnelHandler())
 		}
 		// RDP WebSocket tunnel (ticket auth via query param).
 		// Gated by the rdp module (Max tier) for multi-context deployments.
@@ -465,10 +480,23 @@ func NewRouter(ctx context.Context, cfg *config.Config, db *database.DB, rdb *re
 				// Gated by ssh_terminal module (Max tier).
 				r.With(middleware.RequirePermission("can_use_remote_access", permissionsStore), hostctx.RequireModule("ssh_terminal")).Post("/auth/ssh-ticket", sshTicketHandler.ServeCreate)
 			}
+			if sshGuacdHandler != nil {
+				r.With(middleware.RequirePermission("can_use_remote_access", permissionsStore), hostctx.RequireModule("ssh_terminal")).Post("/auth/ssh-guacd-ticket", sshGuacdHandler.ServeCreateTicket)
+			}
 			if rdpEnabled {
 				// Gated by rdp module (Max tier).
 				r.With(middleware.RequirePermission("can_use_remote_access", permissionsStore), hostctx.RequireModule("rdp")).Post("/auth/rdp-ticket", rdpHandler.ServeCreateTicket)
 			}
+			r.With(middleware.RequirePermission("can_use_remote_access", permissionsStore)).Get("/remote-access/sessions", remoteAccessSessionsHandler.List)
+			r.With(middleware.RequirePermission("can_use_remote_access", permissionsStore)).Get("/remote-access/recordings/{id}", remoteAccessSessionsHandler.Recording)
+			r.With(middleware.RequirePermission("can_use_remote_access", permissionsStore)).Get("/remote-access/recordings/{id}/data", remoteAccessSessionsHandler.RecordingData)
+			r.With(middleware.RequirePermission("can_use_remote_access", permissionsStore)).Get("/remote-access/recordings/{id}/timing", remoteAccessSessionsHandler.RecordingTiming)
+			r.With(middleware.RequirePermission("can_use_remote_access", permissionsStore)).Get("/remote-access/recordings/{id}/download", remoteAccessSessionsHandler.RecordingDownload)
+			r.With(middleware.RequirePermission("can_use_remote_access", permissionsStore)).Get("/remote-access/sessions/{id}/recording", remoteAccessSessionsHandler.Recording)
+			r.With(middleware.RequirePermission("can_use_remote_access", permissionsStore)).Get("/remote-access/sessions/{id}/recording/data", remoteAccessSessionsHandler.RecordingData)
+			r.With(middleware.RequirePermission("can_use_remote_access", permissionsStore)).Get("/remote-access/sessions/{id}/recording/timing", remoteAccessSessionsHandler.RecordingTiming)
+			r.With(middleware.RequirePermission("can_use_remote_access", permissionsStore)).Get("/remote-access/sessions/{id}/recording/download", remoteAccessSessionsHandler.RecordingDownload)
+			r.With(middleware.RequirePermission("can_use_remote_access", permissionsStore)).Get("/remote-access/sessions/{id}", remoteAccessSessionsHandler.Get)
 			r.Get("/user/preferences", userPrefsHandler.Get)
 			r.Patch("/user/preferences", userPrefsHandler.Update)
 			r.Get("/permissions/user-permissions", permissionsHandler.UserPermissions)

@@ -131,6 +131,7 @@ type Querier interface {
 	CountNetworksByHostID(ctx context.Context, hostID string) (int32, error)
 	CountPatchRuns(ctx context.Context, arg CountPatchRunsParams) (int64, error)
 	CountPatchRunsTotal(ctx context.Context) (int64, error)
+	CountRemoteAccessSessions(ctx context.Context, arg CountRemoteAccessSessionsParams) (int32, error)
 	CountRepositories(ctx context.Context) (int32, error)
 	CountRepositoriesForList(ctx context.Context, arg CountRepositoriesForListParams) (int32, error)
 	CountSecureRepositories(ctx context.Context) (int32, error)
@@ -161,6 +162,7 @@ type Querier interface {
 	CreatePatchPolicyExclusion(ctx context.Context, arg CreatePatchPolicyExclusionParams) error
 	// patch_runs
 	CreatePatchRun(ctx context.Context, arg CreatePatchRunParams) error
+	CreateRemoteAccessSession(ctx context.Context, arg CreateRemoteAccessSessionParams) (RemoteAccessSession, error)
 	CreateScheduledReport(ctx context.Context, arg CreateScheduledReportParams) (ScheduledReport, error)
 	CreateSession(ctx context.Context, arg CreateSessionParams) error
 	CreateTrustedDevice(ctx context.Context, arg CreateTrustedDeviceParams) error
@@ -362,6 +364,7 @@ type Querier interface {
 	GetRecentComplianceScans(ctx context.Context) ([]GetRecentComplianceScansRow, error)
 	GetRecentHosts(ctx context.Context, limit int32) ([]GetRecentHostsRow, error)
 	GetRecentUsers(ctx context.Context, limit int32) ([]GetRecentUsersRow, error)
+	GetRemoteAccessSession(ctx context.Context, id string) (GetRemoteAccessSessionRow, error)
 	GetRepoCountsForRepos(ctx context.Context, dollar_1 []string) ([]GetRepoCountsForReposRow, error)
 	GetRepositoryByID(ctx context.Context, id string) (Repository, error)
 	GetRepositoryForDelete(ctx context.Context, id string) (GetRepositoryForDeleteRow, error)
@@ -469,6 +472,7 @@ type Querier interface {
 	ListPatchRunsOrderByStatus(ctx context.Context, arg ListPatchRunsOrderByStatusParams) ([]ListPatchRunsOrderByStatusRow, error)
 	ListPatchRunsOrderByStatusDesc(ctx context.Context, arg ListPatchRunsOrderByStatusDescParams) ([]ListPatchRunsOrderByStatusDescRow, error)
 	ListRecentPatchRuns(ctx context.Context, limit int32) ([]ListRecentPatchRunsRow, error)
+	ListRemoteAccessSessions(ctx context.Context, arg ListRemoteAccessSessionsParams) ([]ListRemoteAccessSessionsRow, error)
 	ListRepositories(ctx context.Context, arg ListRepositoriesParams) ([]ListRepositoriesRow, error)
 	ListRoles(ctx context.Context) ([]RolePermission, error)
 	ListScheduledReports(ctx context.Context) ([]ScheduledReport, error)
@@ -494,6 +498,8 @@ type Querier interface {
 	// every long run timed_out while it was still working and discard the real
 	// outcome the agent later reports.
 	MarkPatchRunsTimedOut(ctx context.Context, arg MarkPatchRunsTimedOutParams) (int64, error)
+	MarkRemoteAccessSessionConnected(ctx context.Context, id string) error
+	MarkRemoteAccessSessionEnded(ctx context.Context, arg MarkRemoteAccessSessionEndedParams) error
 	MarkValidationApproved(ctx context.Context, arg MarkValidationApprovedParams) error
 	RevokeAllSessionsForUser(ctx context.Context, userID string) error
 	RevokeAllSessionsForUserExcept(ctx context.Context, arg RevokeAllSessionsForUserExceptParams) error
@@ -503,6 +509,9 @@ type Querier interface {
 	SetHostAwaitingPostPatchReport(ctx context.Context, arg SetHostAwaitingPostPatchReportParams) error
 	SetNewsletterSubscribed(ctx context.Context, id string) error
 	SetPatchRunPolicySnapshot(ctx context.Context, arg SetPatchRunPolicySnapshotParams) error
+	SetRemoteAccessSessionGuacdID(ctx context.Context, arg SetRemoteAccessSessionGuacdIDParams) error
+	SetRemoteAccessSessionProxyID(ctx context.Context, arg SetRemoteAccessSessionProxyIDParams) error
+	SetRemoteAccessSessionRecording(ctx context.Context, arg SetRemoteAccessSessionRecordingParams) error
 	ToggleHostRepository(ctx context.Context, arg ToggleHostRepositoryParams) error
 	TouchTrustedDeviceLastUsed(ctx context.Context, arg TouchTrustedDeviceLastUsedParams) error
 	UpdateAlert(ctx context.Context, id string) error

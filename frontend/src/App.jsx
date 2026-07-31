@@ -27,6 +27,7 @@ import Packages from "./pages/Packages";
 import Patching from "./pages/Patching";
 import Reporting from "./pages/Reporting";
 import Repositories from "./pages/Repositories";
+import RemoteAccessSessions from "./pages/RemoteAccessSessions";
 import SettingsUsers from "./pages/settings/SettingsUsers";
 
 // Lazy load detail/settings pages (less frequently navigated)
@@ -202,6 +203,14 @@ function AppRoutes() {
 						element={
 							<ProtectedRoute requirePermission="can_view_dashboard">
 								<Automation />
+							</ProtectedRoute>
+						}
+					/>
+					<Route
+						path="/remote-access"
+						element={
+							<ProtectedRoute requirePermission="can_use_remote_access">
+								<RemoteAccessSessions />
 							</ProtectedRoute>
 						}
 					/>
