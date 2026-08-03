@@ -160,7 +160,7 @@ services:
     restart: unless-stopped
     env_file: .env
     ports:
-      - "3000:3000"
+      - "${PORT:-3000}:${PORT:-3000}"
     networks:
       - patchmon-internal
     depends_on:
@@ -322,14 +322,14 @@ docker compose up -d
 
 #### Port 3000 already in use
 
-Change the host-side port in `docker-compose.yml`:
+Set `PORT` in `.env` before starting PatchMon:
 
-```yaml
-ports:
-  - "8080:3000"   # Expose on host port 8080 instead
+```bash
+PORT=8080
+CORS_ORIGIN=http://<server-host>:8080
 ```
 
-Update `SERVER_PORT` in your `.env` to match if agents need to reach the server directly on that port.
+The official `docker-compose.yml` publishes `${PORT:-3000}:${PORT:-3000}`, so changing `PORT` updates both the server listener and the host port Docker binds.
 
 ---
 
@@ -1542,7 +1542,7 @@ General HTTP server and network settings.
 
 | Variable | Default | Required | Description |
 |----------|---------|----------|-------------|
-| `PORT` | `3000` | No | TCP port the server listens on. |
+| `PORT` | `3000` | No | TCP port the server listens on. In the official Docker Compose file, this also controls the published host port. |
 | `APP_ENV` | `production` | No | Runtime environment. Accepted values: `production`, `development`. `NODE_ENV` is also read as a backward-compatibility alias; `APP_ENV` takes precedence when both are set. |
 | `CORS_ORIGIN` | `http://localhost:3000` | No | Allowed CORS origin(s). Must match the exact URL you use to access PatchMon in your browser (protocol, hostname, and port; no path, no trailing slash). To allow multiple origins, separate them with a comma and no spaces (e.g. `https://patchmon.example.com,https://patchmon.internal.lan`). |
 | `ENABLE_HSTS` | `false` | No | When `true`, the server adds an `HTTP Strict Transport Security` header to responses. Enable this only when PatchMon is served over HTTPS. |
@@ -5242,7 +5242,7 @@ A stock `docker-compose.yml` deployment runs four containers on the `patchmon-in
 
 | Service | Image | Port (exposed) | Depends on |
 |---------|-------|----------------|-----------|
-| `server` | `ghcr.io/patchmon/patchmon-server:latest` | `3000:3000` | `database`, `redis`, `guacd` |
+| `server` | `ghcr.io/patchmon/patchmon-server:latest` | `${PORT:-3000}:${PORT:-3000}` | `database`, `redis`, `guacd` |
 | `database` | `postgres:17-alpine` | not exposed | n/a |
 | `redis` | `redis:7-alpine` | not exposed | n/a |
 | `guacd` | `guacamole/guacd:1.5.5` | not exposed | n/a |
